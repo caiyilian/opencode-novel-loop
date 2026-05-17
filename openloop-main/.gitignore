@@ -1,0 +1,4 @@
+node_modules/
+.opencode/ralph-loop.local.md
+*.tgz
+.DS_Store

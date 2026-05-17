@@ -1,0 +1,47 @@
+{
+  "name": "@felipejesus/openloop",
+  "version": "0.1.1",
+  "description": "Ralph Loop plugin for OpenCode with automatic continuation until completion.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/felipepiresdejesus/openloop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/felipepiresdejesus/openloop/issues"
+  },
+  "homepage": "https://github.com/felipepiresdejesus/openloop#readme",
+  "files": [
+    "src/",
+    "commands/",
+    "skills/",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "release:check": "npm run typecheck && npm pack --dry-run"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "ralph-loop",
+    "ai-agent",
+    "auto-continue"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.2.24",
+    "@opencode-ai/sdk": "^1.2.24"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "typescript": "^5.8.2"
+  }
+}
