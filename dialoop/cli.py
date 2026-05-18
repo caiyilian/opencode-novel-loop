@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .environment import check_environment
-from .runner import ConfigError, build_config, render_dry_run_report
+from .runner import ConfigError, RunnerError, build_config, render_status_report, run_loop
 
 
 def positive_int(value: str) -> int:
@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum line gap treated as continuous dialogue.",
     )
     parser.add_argument(
+        "--max-iterations",
+        type=positive_int,
+        default=100,
+        help="Maximum OpenCode continuation iterations before stopping.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print resolved paths and environment checks without starting OpenCode.",
@@ -65,19 +71,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             output_path=args.output,
             batch_size=args.batch_size,
             threshold=args.threshold,
+            max_iterations=args.max_iterations,
         )
     except ConfigError as error:
         parser.exit(2, f"dialoop: error: {error}\n")
 
     environment = check_environment()
-    print(render_dry_run_report(config, environment))
 
     if args.dry_run:
+        print(render_status_report(config, environment, title="Dialoop dry run"))
         return 0
 
+    print(render_status_report(config, environment, title="Dialoop run"))
     print()
-    print("Dialoop runner is not implemented yet. Use --dry-run for the current skeleton phase.")
-    return 2
+
+    try:
+        result = run_loop(config, environment)
+    except RunnerError as error:
+        parser.exit(1, f"dialoop: error: {error}\n")
+
+    print()
+    print(f"Dialoop completed after {result.iterations} iteration(s).")
+    return 0
 
 
 if __name__ == "__main__":

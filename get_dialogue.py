@@ -1,13 +1,12 @@
-import os
 import re
 import argparse
-import sys
+from pathlib import Path
 
 
-def get_label_count():
-    if not os.path.exists("labeled.txt"):
+def get_label_count(labels_path):
+    if not labels_path.exists():
         return 0
-    with open("labeled.txt", "r", encoding="utf-8") as f:
+    with labels_path.open("r", encoding="utf-8") as f:
         count = len(f.readlines())
     return count
 
@@ -27,6 +26,12 @@ def extract_dialogue_with_line_numbers(text):
 def main():
     parser = argparse.ArgumentParser(description="获取待标注的对话")
     parser.add_argument(
+        "--novel", type=Path, default=Path("novel.txt"), help="小说文本路径（默认 novel.txt）"
+    )
+    parser.add_argument(
+        "--labels", type=Path, default=Path("labeled.txt"), help="已标注结果路径（默认 labeled.txt）"
+    )
+    parser.add_argument(
         "--batch-size", type=int, default=1, help="最大一次性获取的对话数量（默认1）"
     )
     parser.add_argument(
@@ -34,11 +39,11 @@ def main():
     )
     args = parser.parse_args()
 
-    with open("novel.txt", "r", encoding="utf-8") as f:
+    with args.novel.open("r", encoding="utf-8") as f:
         content = f.read()
 
     dialogues = extract_dialogue_with_line_numbers(content)
-    now_count = get_label_count()
+    now_count = get_label_count(args.labels)
 
     if now_count >= len(dialogues):
         print("已经标注完毕")
@@ -79,16 +84,16 @@ def main():
         line_num, dialogue = batch[0]
         print(f"待标注对话：第{line_num}行「{dialogue}」")
         print()
-        print("请仔细分析 `novel.txt` 中对应行的上下文，判断说话角色。")
-        print("然后调用 write_label.py --name <角色名>")
+        print(f"请仔细分析 `{args.novel}` 中对应行的上下文，判断说话角色。")
+        print(f'然后调用 write_label.py --labels "{args.labels}" --name <角色名>')
     else:
         # 批量标注模式
         print(f"待标注对话批次（{len(batch)}句）：")
         for i, (line_num, dialogue) in enumerate(batch, 1):
             print(f"{i}. 第{line_num}行：「{dialogue}」")
         print()
-        print("请仔细分析 `novel.txt` 中对应行的上下文，判断每句话的说话角色。")
-        print("然后调用 write_label.py --name 角色名1 --name 角色名2 ... 按顺序标注。")
+        print(f"请仔细分析 `{args.novel}` 中对应行的上下文，判断每句话的说话角色。")
+        print(f'然后调用 write_label.py --labels "{args.labels}" --name 角色名1 --name 角色名2 ... 按顺序标注。')
 
 
 if __name__ == "__main__":

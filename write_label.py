@@ -1,10 +1,12 @@
-# write_label.py
-import sys
 import argparse
+from pathlib import Path
 
 
 def main():
     parser = argparse.ArgumentParser(description="追加名字到 labeled.txt")
+    parser.add_argument(
+        "--labels", type=Path, default=Path("labeled.txt"), help="标注结果路径（默认 labeled.txt）"
+    )
     parser.add_argument(
         "--name",
         type=str,
@@ -17,7 +19,8 @@ def main():
     names = args.name
 
     # 追加到文件，每个名字一行
-    with open("labeled.txt", "a", encoding="utf-8") as f:
+    args.labels.parent.mkdir(parents=True, exist_ok=True)
+    with args.labels.open("a", encoding="utf-8") as f:
         for name in names:
             f.write(name + "\n")
 
