@@ -197,14 +197,18 @@ class DialoopLocalTools:
         dialogue_index: DialogueIndex,
         label_store: LabelStore,
         batch_size: int = 1,
+        max_line_gap: Optional[int] = None,
         read_window_limit: int = 300,
         search_limit: int = 20,
     ):
         if batch_size <= 0:
             raise ToolValidationError("batch_size must be greater than 0")
+        if max_line_gap is not None and max_line_gap < 0:
+            raise ToolValidationError("max_line_gap must be 0 or greater")
         self.dialogue_index = dialogue_index
         self.label_store = label_store
         self.batch_size = batch_size
+        self.max_line_gap = max_line_gap
         self.read_window_limit = read_window_limit
         self.search_limit = search_limit
         self._active_batch: list[Dialogue] = []
@@ -215,6 +219,7 @@ class DialoopLocalTools:
         novel_path: Path,
         labels_path: Path,
         batch_size: int = 1,
+        max_line_gap: Optional[int] = None,
         read_window_limit: int = 300,
         search_limit: int = 20,
     ) -> "DialoopLocalTools":
@@ -222,6 +227,7 @@ class DialoopLocalTools:
             dialogue_index=DialogueIndex.from_file(novel_path),
             label_store=LabelStore(labels_path),
             batch_size=batch_size,
+            max_line_gap=max_line_gap,
             read_window_limit=read_window_limit,
             search_limit=search_limit,
         )
@@ -239,7 +245,7 @@ class DialoopLocalTools:
     def get_next_dialogue(self, batch_size: Optional[int] = None) -> dict[str, Any]:
         size = batch_size or self.batch_size
         progress = self.get_progress()
-        batch = self.dialogue_index.next_batch(progress["labeled"], size)
+        batch = self.dialogue_index.next_batch(progress["labeled"], size, max_line_gap=self.max_line_gap)
         self._active_batch = batch
 
         return {

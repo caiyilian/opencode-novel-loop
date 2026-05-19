@@ -40,6 +40,7 @@ class ChatMessage:
     content: str
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -50,6 +51,8 @@ class ChatMessage:
             data["name"] = self.name
         if self.tool_call_id:
             data["tool_call_id"] = self.tool_call_id
+        if self.tool_calls:
+            data["tool_calls"] = self.tool_calls
         return data
 
 
@@ -58,6 +61,16 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+
+    def to_openai_tool_call(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": json.dumps(self.arguments, ensure_ascii=False),
+            },
+        }
 
 
 @dataclass(frozen=True)

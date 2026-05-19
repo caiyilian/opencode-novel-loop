@@ -118,6 +118,26 @@ class DialoopLocalToolsTest(unittest.TestCase):
             self.assertTrue(tools.get_next_dialogue()["done"])
             self.assertIn("2: 罗伦斯说", tools.read_novel(2, 2)["text"])
             self.assertEqual(tools.search_novel("赫萝")["total_matches"], 1)
+    def test_get_next_dialogue_respects_max_line_gap(self) -> None:
+        text = "\n".join(
+            [
+                "A: \u300cOne.\u300d",
+                "narration",
+                "B: \u300cTwo.\u300d",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(
+                DialogueIndex.from_text(text),
+                LabelStore(labels),
+                batch_size=2,
+                max_line_gap=0,
+            )
+
+            next_dialogue = tools.get_next_dialogue()
+
+            self.assertEqual(len(next_dialogue["dialogues"]), 1)
 
 
 if __name__ == "__main__":

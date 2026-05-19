@@ -5,8 +5,17 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
+from .agent_loop import AgentBatchResult, AgentLoopConfig, AgentLoopError, AgentRunner
 from .environment import CommandStatus, check_python
-from .model_client import DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL, ModelConfig, OpenAICompatibleClient
+from .local_tools import DialoopLocalTools
+from .model_client import (
+    DEFAULT_API_KEY,
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    ModelClientError,
+    ModelConfig,
+    OpenAICompatibleClient,
+)
 from .runner import ConfigError, DialoopConfig, build_config
 
 
@@ -59,7 +68,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-iterations",
         type=positive_int,
         default=100,
-        help="Maximum agent iterations before stopping.",
+        help="Reserved for the future long-running loop. Phase 3 runs one batch per command.",
+    )
+    parser.add_argument(
+        "--max-tool-steps",
+        type=positive_int,
+        default=20,
+        help="Maximum model/tool steps for one dialogue batch.",
+    )
+    parser.add_argument(
+        "--read-window-limit",
+        type=positive_int,
+        default=300,
+        help="Maximum novel lines returned by one read_novel tool call.",
+    )
+    parser.add_argument(
+        "--search-limit",
+        type=positive_int,
+        default=20,
+        help="Default maximum matches returned by one search_novel tool call.",
     )
     parser.add_argument(
         "--base-url",
@@ -124,16 +151,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     if args.dry_run:
-        print(render_dry_run_report(config, check_python(), title="Dialoop dry run"))
+        print(
+            render_dry_run_report(
+                config,
+                check_python(),
+                title="Dialoop dry run",
+                max_tool_steps=args.max_tool_steps,
+                read_window_limit=args.read_window_limit,
+                search_limit=args.search_limit,
+            )
+        )
         print()
         print(render_model_report(model_config, protocol=args.protocol, check_model=args.check_model))
         return 0
 
-    parser.exit(
-        1,
-        "dialoop: error: the independent Python agent loop is not implemented yet. "
-        "Use --dry-run for configuration checks; phase 3 will add the model-driven labeling loop.\n",
+    tools = DialoopLocalTools.from_paths(
+        novel_path=config.novel_path,
+        labels_path=config.output_path,
+        batch_size=config.batch_size,
+        max_line_gap=config.threshold,
+        read_window_limit=args.read_window_limit,
+        search_limit=args.search_limit,
     )
+    agent = AgentRunner(
+        model_client=OpenAICompatibleClient(model_config),
+        tools=tools,
+        config=AgentLoopConfig(
+            protocol=args.protocol,
+            max_tool_steps=args.max_tool_steps,
+        ),
+    )
+
+    try:
+        result = agent.run_one_batch()
+    except (AgentLoopError, ModelClientError) as error:
+        parser.exit(1, f"dialoop: error: {error}\n")
+
+    print(render_agent_result(result))
+    return 0
 
 
 def _format_command_status(status: CommandStatus) -> list[str]:
@@ -148,7 +203,14 @@ def _format_command_status(status: CommandStatus) -> list[str]:
     return lines
 
 
-def render_dry_run_report(config: DialoopConfig, python_status: CommandStatus, title: str) -> str:
+def render_dry_run_report(
+    config: DialoopConfig,
+    python_status: CommandStatus,
+    title: str,
+    max_tool_steps: Optional[int] = None,
+    read_window_limit: Optional[int] = None,
+    search_limit: Optional[int] = None,
+) -> str:
     lines = [
         title,
         "",
@@ -165,10 +227,30 @@ def render_dry_run_report(config: DialoopConfig, python_status: CommandStatus, t
         f"  batch_size: {config.batch_size}",
         f"  threshold: {config.threshold}",
         f"  max_iterations: {config.max_iterations}",
-        "",
-        "Environment:",
     ]
+    if max_tool_steps is not None:
+        lines.append(f"  max_tool_steps: {max_tool_steps}")
+    if read_window_limit is not None:
+        lines.append(f"  read_window_limit: {read_window_limit}")
+    if search_limit is not None:
+        lines.append(f"  search_limit: {search_limit}")
+    lines.extend(["", "Environment:"])
     lines.extend(f"  {line}" for line in _format_command_status(python_status))
+    return "\n".join(lines)
+
+
+def render_agent_result(result: AgentBatchResult) -> str:
+    lines = [
+        "Dialoop batch result:",
+        f"  submitted: {str(result.submitted).lower()}",
+        f"  done: {str(result.done).lower()}",
+        f"  tool_steps: {result.tool_steps}",
+        f"  message: {result.message}",
+        "  progress:",
+        f"    labeled: {result.progress['labeled']}",
+        f"    total: {result.progress['total']}",
+        f"    remaining: {result.progress['remaining']}",
+    ]
     return "\n".join(lines)
 
 
