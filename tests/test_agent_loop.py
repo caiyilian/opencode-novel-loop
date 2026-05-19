@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 
-from dialoop.agent_loop import AgentLoopConfig, AgentLoopError, AgentRunner
+from dialoop.agent_loop import AgentLoopConfig, AgentLoopError, AgentRunner, format_prompt_messages
 from dialoop.local_tools import DialogueIndex, DialoopLocalTools, LabelStore
-from dialoop.model_client import ChatResult, ToolCall
+from dialoop.model_client import ChatMessage, ChatResult, ToolCall
 
 
 SAMPLE_TEXT = "\n".join(
@@ -90,6 +91,56 @@ class AgentLoopTest(unittest.TestCase):
             self.assertTrue(result.submitted)
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
             self.assertIsNone(client.calls[0]["tools"])
+
+    def test_prompt_output_prints_initial_messages_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 1},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+            output = StringIO()
+
+            AgentRunner(client, tools, AgentLoopConfig(protocol="tools"), prompt_output=output).run_one_batch()
+
+            printed = output.getvalue()
+            self.assertIn("Dialoop prompt:", printed)
+            self.assertIn("--- system ---", printed)
+            self.assertIn("--- user ---", printed)
+            self.assertIn("read_novel", printed)
+            self.assertNotIn("Tool result", printed)
+
+    def test_format_prompt_messages_labels_roles(self) -> None:
+        rendered = format_prompt_messages(
+            [
+                ChatMessage(role="system", content="system text"),
+                ChatMessage(role="user", content="user text"),
+            ]
+        )
+
+        self.assertIn("--- system ---\nsystem text", rendered)
+        self.assertIn("--- user ---\nuser text", rendered)
 
     def test_submit_before_context_is_rejected_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

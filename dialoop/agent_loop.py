@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, TextIO
 
 from .local_tools import DialoopLocalTools, ToolValidationError
 from .model_client import ChatMessage, ChatResult, ToolCall
@@ -102,10 +102,12 @@ class AgentRunner:
         model_client: Any,
         tools: DialoopLocalTools,
         config: Optional[AgentLoopConfig] = None,
+        prompt_output: Optional[TextIO] = None,
     ):
         self.model_client = model_client
         self.tools = tools
         self.config = config or AgentLoopConfig()
+        self.prompt_output = prompt_output
         self._used_context_tool = False
 
     def run_one_batch(self) -> AgentBatchResult:
@@ -124,6 +126,8 @@ class AgentRunner:
             ChatMessage(role="system", content=system_prompt(self.config.protocol)),
             ChatMessage(role="user", content=batch_prompt(initial_batch)),
         ]
+        if self.prompt_output is not None:
+            print(format_prompt_messages(messages), file=self.prompt_output)
         history: list[ToolExecution] = []
 
         for step in range(1, self.config.max_tool_steps + 1):
@@ -258,6 +262,19 @@ class AgentRunner:
 
 def format_tool_result(result: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+def format_prompt_messages(messages: list[ChatMessage]) -> str:
+    lines = ["Dialoop prompt:"]
+    for message in messages:
+        lines.extend(
+            [
+                f"--- {message.role} ---",
+                message.content,
+            ]
+        )
+    lines.append("--- end prompt ---")
+    return "\n".join(lines)
 
 
 def required_int(args: dict[str, Any], name: str) -> int:

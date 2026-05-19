@@ -91,6 +91,23 @@ class CliTest(unittest.TestCase):
         self.assertIn("submitted: true", stdout.getvalue())
         self.assertEqual(labels_text, "Lawrence\n")
 
+    def test_show_prompt_prints_prompt_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            novel_path = Path(temp_dir) / "novel.txt"
+            output_path = Path(temp_dir) / "labels.txt"
+            novel_path.write_text("Lawrence said: \u300cHello.\u300d\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with patch("dialoop.cli.OpenAICompatibleClient", FakeOpenAICompatibleClient):
+                with redirect_stdout(stdout):
+                    exit_code = main([str(novel_path), "--output", str(output_path), "--show-prompt"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Dialoop prompt:", stdout.getvalue())
+        self.assertIn("--- system ---", stdout.getvalue())
+        self.assertIn("--- user ---", stdout.getvalue())
+        self.assertIn("Dialoop batch result:", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

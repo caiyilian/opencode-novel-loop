@@ -125,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print resolved paths and environment/model checks without starting a labeling run.",
     )
+    parser.add_argument(
+        "--show-prompt",
+        action="store_true",
+        help="Print the initial system/user prompt for the current batch to stdout.",
+    )
     return parser
 
 
@@ -180,6 +185,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             protocol=args.protocol,
             max_tool_steps=args.max_tool_steps,
         ),
+        prompt_output=sys.stdout if args.show_prompt else None,
     )
 
     try:
