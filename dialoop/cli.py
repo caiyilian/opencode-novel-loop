@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .environment import check_environment
+from .model_client import DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL, ModelConfig, OpenAICompatibleClient
 from .runner import ConfigError, RunnerError, build_config, render_status_report, run_loop
 
 
@@ -20,6 +21,13 @@ def non_negative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be 0 or greater")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
     return parsed
 
 
@@ -54,6 +62,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum OpenCode continuation iterations before stopping.",
     )
     parser.add_argument(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        help="OpenAI-compatible model endpoint base URL.",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=DEFAULT_API_KEY,
+        help="API key for the OpenAI-compatible endpoint. Ollama accepts a placeholder value.",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Model name for the OpenAI-compatible endpoint.",
+    )
+    parser.add_argument(
+        "--protocol",
+        choices=["auto", "tools", "json"],
+        default="auto",
+        help="Model tool protocol to use in the future agent loop.",
+    )
+    parser.add_argument(
+        "--model-timeout",
+        type=positive_float,
+        default=30.0,
+        help="Timeout in seconds for model endpoint requests.",
+    )
+    parser.add_argument(
+        "--check-model",
+        action="store_true",
+        help="During --dry-run, send one small request to the configured model endpoint.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print resolved paths and environment checks without starting OpenCode.",
@@ -77,9 +117,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.exit(2, f"dialoop: error: {error}\n")
 
     environment = check_environment()
+    model_config = ModelConfig(
+        base_url=args.base_url,
+        api_key=args.api_key,
+        model=args.model,
+        timeout=args.model_timeout,
+    )
 
     if args.dry_run:
         print(render_status_report(config, environment, title="Dialoop dry run"))
+        print()
+        print(render_model_report(model_config, protocol=args.protocol, check_model=args.check_model))
         return 0
 
     print(render_status_report(config, environment, title="Dialoop run"))
@@ -93,6 +141,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print()
     print(f"Dialoop completed after {result.iterations} iteration(s).")
     return 0
+
+
+def render_model_report(model_config: ModelConfig, protocol: str, check_model: bool) -> str:
+    lines = [
+        "Model backend:",
+        f"  base_url: {model_config.base_url}",
+        f"  model: {model_config.model}",
+        f"  protocol: {protocol}",
+        f"  timeout: {model_config.timeout:g}s",
+    ]
+    if not check_model:
+        lines.append("  connection: skipped (use --check-model to test)")
+        return "\n".join(lines)
+
+    status = OpenAICompatibleClient(model_config).check_connection()
+    state = "ok" if status.ok else "failed"
+    lines.append(f"  connection: {state}")
+    lines.append(f"  message: {status.message}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
