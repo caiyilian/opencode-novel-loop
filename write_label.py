@@ -1,6 +1,8 @@
 import argparse
 from pathlib import Path
 
+from dialoop.local_tools import LabelStore
+
 
 def main():
     parser = argparse.ArgumentParser(description="追加名字到 labeled.txt")
@@ -19,10 +21,7 @@ def main():
     names = args.name
 
     # 追加到文件，每个名字一行
-    args.labels.parent.mkdir(parents=True, exist_ok=True)
-    with args.labels.open("a", encoding="utf-8") as f:
-        for name in names:
-            f.write(name + "\n")
+    LabelStore(args.labels).append(names)
 
     print(f"已标注 {len(names)} 个角色：{', '.join(names)}")
 
