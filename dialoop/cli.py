@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .environment import check_environment
+from .environment import CommandStatus, check_python
 from .model_client import DEFAULT_API_KEY, DEFAULT_BASE_URL, DEFAULT_MODEL, ModelConfig, OpenAICompatibleClient
-from .runner import ConfigError, RunnerError, build_config, render_status_report, run_loop
+from .runner import ConfigError, DialoopConfig, build_config
 
 
 def positive_int(value: str) -> int:
@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-iterations",
         type=positive_int,
         default=100,
-        help="Maximum OpenCode continuation iterations before stopping.",
+        help="Maximum agent iterations before stopping.",
     )
     parser.add_argument(
         "--base-url",
@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print resolved paths and environment checks without starting OpenCode.",
+        help="Print resolved paths and environment/model checks without starting a labeling run.",
     )
     return parser
 
@@ -116,7 +116,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ConfigError as error:
         parser.exit(2, f"dialoop: error: {error}\n")
 
-    environment = check_environment()
     model_config = ModelConfig(
         base_url=args.base_url,
         api_key=args.api_key,
@@ -125,22 +124,52 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     if args.dry_run:
-        print(render_status_report(config, environment, title="Dialoop dry run"))
+        print(render_dry_run_report(config, check_python(), title="Dialoop dry run"))
         print()
         print(render_model_report(model_config, protocol=args.protocol, check_model=args.check_model))
         return 0
 
-    print(render_status_report(config, environment, title="Dialoop run"))
-    print()
+    parser.exit(
+        1,
+        "dialoop: error: the independent Python agent loop is not implemented yet. "
+        "Use --dry-run for configuration checks; phase 3 will add the model-driven labeling loop.\n",
+    )
 
-    try:
-        result = run_loop(config, environment)
-    except RunnerError as error:
-        parser.exit(1, f"dialoop: error: {error}\n")
 
-    print()
-    print(f"Dialoop completed after {result.iterations} iteration(s).")
-    return 0
+def _format_command_status(status: CommandStatus) -> list[str]:
+    state = "found" if status.available else "missing"
+    lines = [f"{status.name}: {state}"]
+    if status.executable:
+        lines.append(f"  executable: {status.executable}")
+    if status.version:
+        lines.append(f"  version: {status.version}")
+    if status.install_hint:
+        lines.append(f"  install: {status.install_hint}")
+    return lines
+
+
+def render_dry_run_report(config: DialoopConfig, python_status: CommandStatus, title: str) -> str:
+    lines = [
+        title,
+        "",
+        "Paths:",
+        f"  novel: {config.novel_path}",
+        f"  output: {config.output_path}",
+        f"  workdir: {config.workdir}",
+        "",
+        "Local tools:",
+        f"  get_dialogue.py: {config.get_dialogue_path}",
+        f"  write_label.py: {config.write_label_path}",
+        "",
+        "Dialogue options:",
+        f"  batch_size: {config.batch_size}",
+        f"  threshold: {config.threshold}",
+        f"  max_iterations: {config.max_iterations}",
+        "",
+        "Environment:",
+    ]
+    lines.extend(f"  {line}" for line in _format_command_status(python_status))
+    return "\n".join(lines)
 
 
 def render_model_report(model_config: ModelConfig, protocol: str, check_model: bool) -> str:
