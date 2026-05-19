@@ -68,6 +68,8 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
             self.assertIsNotNone(client.calls[0]["tools"])
             sent_messages = [message.to_dict() for message in client.calls[1]["messages"]]
+            self.assertIn("简体中文", sent_messages[0]["content"])
+            self.assertIn("第一步请调用 read_novel", sent_messages[1]["content"])
             self.assertIn("tool_calls", sent_messages[2])
             self.assertEqual(sent_messages[3]["role"], "tool")
             self.assertEqual(sent_messages[3]["tool_call_id"], "call-read")
@@ -89,12 +91,68 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
             self.assertIsNone(client.calls[0]["tools"])
 
+    def test_submit_before_context_is_rejected_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="early-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 1},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="good-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=4)).run_one_batch()
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+            self.assertEqual(result.tool_history[0].result["accepted"], False)
+            self.assertIn("call read_novel or search_novel", result.tool_history[0].result["error"])
+
     def test_submit_validation_error_is_returned_to_model_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             labels = Path(directory) / "labels.txt"
             tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=2)
             client = FakeModelClient(
                 [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
                     ChatResult(
                         content="",
                         tool_calls=[
@@ -122,8 +180,8 @@ class AgentLoopTest(unittest.TestCase):
 
             self.assertTrue(result.submitted)
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence", "Holo"])
-            self.assertEqual(result.tool_history[0].result["accepted"], False)
-            self.assertIn("speaker count mismatch", result.tool_history[0].result["error"])
+            self.assertEqual(result.tool_history[1].result["accepted"], False)
+            self.assertIn("speaker count mismatch", result.tool_history[1].result["error"])
 
     def test_bad_tool_argument_type_is_returned_to_model_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -131,6 +189,16 @@ class AgentLoopTest(unittest.TestCase):
             tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
             client = FakeModelClient(
                 [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 1},
+                            )
+                        ],
+                    ),
                     ChatResult(
                         content="",
                         tool_calls=[
@@ -158,7 +226,7 @@ class AgentLoopTest(unittest.TestCase):
 
             self.assertTrue(result.submitted)
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
-            self.assertIn("speakers must be a list of strings", result.tool_history[0].result["error"])
+            self.assertIn("speakers must be a list of strings", result.tool_history[1].result["error"])
 
     def test_done_batch_does_not_call_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

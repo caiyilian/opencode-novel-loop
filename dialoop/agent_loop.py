@@ -18,6 +18,7 @@ class AgentLoopConfig:
     protocol: str = "auto"
     max_tool_steps: int = 20
     temperature: float = 0.0
+    require_context_before_submit: bool = True
 
     def __post_init__(self) -> None:
         if self.protocol not in {"auto", "tools", "json"}:
@@ -50,37 +51,46 @@ def system_prompt(protocol: str) -> str:
     json_instruction = ""
     if protocol in {"auto", "json"}:
         json_instruction = (
-            "\nIf native tool calls are unavailable, reply with exactly one JSON object in this form: "
+            "\n如果原生 tool calling 不可用，请严格只输出一个 JSON object，例如："
             '{"action":"read_novel","args":{"start_line":1,"end_line":20}}. '
-            "Use submit_labels when you are ready."
+            "准备好后用 submit_labels 提交。"
         )
 
     return (
-        "You label the speaker of quoted dialogue in a novel. "
-        "Use tools to read context, search the novel, and submit labels. "
-        "Do not edit files directly. "
-        "Submit exactly one speaker name for each dialogue in the active batch, in order. "
-        "If context is insufficient, read more lines before submitting. "
-        "Generic speakers such as Unknown, Crowd, Merchant, or Clerk are acceptable when the text is ambiguous."
+        "你是小说对话说话人标注助手。"
+        "你的任务是判断当前 batch 中每一句引号对话的说话人。"
+        "提交前必须先用 read_novel 读取目标行附近的原文上下文；如果仍不确定，再用 search_novel 搜索相关人名、称呼或关键词。"
+        "标签必须使用简体中文，不要输出英文，也不要把身份翻译成 Customer、Merchant、Clerk 这类英文词。"
+        "优先使用原文中出现的人名、称呼或稳定身份。"
+        "如果没有姓名但上下文有身份或群体，请用中文身份词，例如：村民、骑士、店员、商人、众人、未知。"
+        "不要用临时行为关系替代更稳定身份；例如上下文说明是村落居民时，用“村民”而不是“顾客”。"
+        "不要直接编辑文件。"
+        "提交时必须调用 submit_labels，且 speaker 数量必须等于当前 batch 的对话数量，顺序必须一致。"
         + json_instruction
     )
 
 
 def batch_prompt(batch_result: dict[str, Any]) -> str:
     progress = batch_result["progress"]
+    dialogues = batch_result["dialogues"]
+    first_line = min(dialogue["line_number"] for dialogue in dialogues)
+    last_line = max(dialogue["line_number"] for dialogue in dialogues)
+    context_start = max(1, first_line - 12)
+    context_end = last_line + 12
     lines = [
-        "Label the active dialogue batch.",
-        f"Progress: {progress['labeled']}/{progress['total']} labeled, {progress['remaining']} remaining.",
+        "请标注当前对话 batch。",
+        f"进度：已标注 {progress['labeled']}/{progress['total']}，剩余 {progress['remaining']}。",
         "",
-        "Dialogues:",
+        "当前对话：",
     ]
-    for offset, dialogue in enumerate(batch_result["dialogues"], start=1):
-        lines.append(f"{offset}. index={dialogue['index']} line={dialogue['line_number']} text={dialogue['text']}")
+    for offset, dialogue in enumerate(dialogues, start=1):
+        lines.append(f"{offset}. index={dialogue['index']} 行号={dialogue['line_number']} 文本={dialogue['text']}")
     lines.extend(
         [
             "",
-            "Use read_novel or search_novel if needed.",
-            "Finish this batch by calling submit_labels with the speaker names in the same order.",
+            f"第一步请调用 read_novel(start_line={context_start}, end_line={context_end}) 读取上下文。",
+            "根据上下文判断说话人；如果需要更多线索，再调用 read_novel 或 search_novel。",
+            "最后调用 submit_labels，按上述对话顺序提交简体中文 speaker 标签。",
         ]
     )
     return "\n".join(lines)
@@ -96,8 +106,10 @@ class AgentRunner:
         self.model_client = model_client
         self.tools = tools
         self.config = config or AgentLoopConfig()
+        self._used_context_tool = False
 
     def run_one_batch(self) -> AgentBatchResult:
+        self._used_context_tool = False
         initial_batch = self.tools.get_next_dialogue()
         if initial_batch["done"]:
             return AgentBatchResult(
@@ -228,6 +240,8 @@ class AgentRunner:
                     limit=optional_int(args, "limit"),
                 )
             elif name == "submit_labels":
+                if self.config.require_context_before_submit and not self._used_context_tool:
+                    raise ToolValidationError("call read_novel or search_novel before submit_labels")
                 result = self.tools.submit_labels(speakers=required_str_list(args, "speakers"))
             else:
                 raise AgentLoopError(f"unknown tool call: {name}")
@@ -235,6 +249,9 @@ class AgentRunner:
             result = {"accepted": False, "error": f"missing required argument: {error.args[0]}"}
         except ToolValidationError as error:
             result = {"accepted": False, "error": str(error)}
+
+        if name in {"read_novel", "search_novel"} and "error" not in result:
+            self._used_context_tool = True
 
         return ToolExecution(name=name, result=result)
 

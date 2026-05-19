@@ -14,18 +14,33 @@ from dialoop.model_client import ChatResult, ToolCall
 class FakeOpenAICompatibleClient:
     def __init__(self, _config):
         self.config = _config
+        self.responses = [
+            ChatResult(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-read",
+                        name="read_novel",
+                        arguments={"start_line": 1, "end_line": 1},
+                    )
+                ],
+            ),
+            ChatResult(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-submit",
+                        name="submit_labels",
+                        arguments={"speakers": ["Lawrence"]},
+                    )
+                ],
+            ),
+        ]
 
     def chat(self, **_kwargs):
-        return ChatResult(
-            content="",
-            tool_calls=[
-                ToolCall(
-                    id="call-submit",
-                    name="submit_labels",
-                    arguments={"speakers": ["Lawrence"]},
-                )
-            ],
-        )
+        if not self.responses:
+            raise AssertionError("model was called more times than expected")
+        return self.responses.pop(0)
 
 
 class CliTest(unittest.TestCase):
