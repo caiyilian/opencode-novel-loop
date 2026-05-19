@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-iterations",
         type=positive_int,
         default=100,
-        help="Reserved for the future long-running loop. Phase 3 runs one batch per command.",
+        help="Maximum dialogue batches to process in this run.",
     )
     parser.add_argument(
         "--max-tool-steps",
@@ -189,11 +189,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     try:
-        result = agent.run_one_batch()
+        for iteration in range(1, args.max_iterations + 1):
+            result = agent.run_one_batch()
+            print(render_agent_result(result, iteration=iteration, max_iterations=args.max_iterations))
+            if result.done:
+                print()
+                print("Dialoop run complete.")
+                return 0
+            print()
+    except KeyboardInterrupt:
+        print()
+        print(render_interrupted_result(tools.get_progress()))
+        return 130
     except (AgentLoopError, ModelClientError) as error:
         parser.exit(1, f"dialoop: error: {error}\n")
 
-    print(render_agent_result(result))
+    print(render_iteration_limit_result(args.max_iterations, tools.get_progress()))
     return 0
 
 
@@ -245,17 +256,53 @@ def render_dry_run_report(
     return "\n".join(lines)
 
 
-def render_agent_result(result: AgentBatchResult) -> str:
+def render_agent_result(
+    result: AgentBatchResult,
+    iteration: Optional[int] = None,
+    max_iterations: Optional[int] = None,
+) -> str:
     lines = [
         "Dialoop batch result:",
         f"  submitted: {str(result.submitted).lower()}",
         f"  done: {str(result.done).lower()}",
         f"  tool_steps: {result.tool_steps}",
         f"  message: {result.message}",
+    ]
+    if iteration is not None and max_iterations is not None:
+        lines.append(f"  iteration: {iteration}/{max_iterations}")
+    if result.batch_dialogues:
+        lines.append("  batch:")
+        for dialogue in result.batch_dialogues:
+            lines.append(f"    - index: {dialogue['index']}, line: {dialogue['line_number']}")
+    lines.extend(
+        [
+            "  progress:",
+            f"    labeled: {result.progress['labeled']}",
+            f"    total: {result.progress['total']}",
+            f"    remaining: {result.progress['remaining']}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_iteration_limit_result(max_iterations: int, progress: dict) -> str:
+    lines = [
+        f"Dialoop stopped after reaching --max-iterations={max_iterations}.",
         "  progress:",
-        f"    labeled: {result.progress['labeled']}",
-        f"    total: {result.progress['total']}",
-        f"    remaining: {result.progress['remaining']}",
+        f"    labeled: {progress['labeled']}",
+        f"    total: {progress['total']}",
+        f"    remaining: {progress['remaining']}",
+    ]
+    return "\n".join(lines)
+
+
+def render_interrupted_result(progress: dict) -> str:
+    lines = [
+        "Dialoop interrupted. Progress already written to the output file is preserved.",
+        "  progress:",
+        f"    labeled: {progress['labeled']}",
+        f"    total: {progress['total']}",
+        f"    remaining: {progress['remaining']}",
     ]
     return "\n".join(lines)
 

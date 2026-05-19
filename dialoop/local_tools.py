@@ -186,8 +186,7 @@ class LabelStore:
 
         self.labels_path.parent.mkdir(parents=True, exist_ok=True)
         with self.labels_path.open("a", encoding="utf-8") as file:
-            for speaker in cleaned:
-                file.write(speaker + "\n")
+            file.write("".join(f"{speaker}\n" for speaker in cleaned))
         return len(cleaned)
 
 

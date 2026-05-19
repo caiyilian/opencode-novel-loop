@@ -44,6 +44,7 @@ class AgentBatchResult:
     tool_steps: int
     progress: dict[str, Any]
     message: str
+    batch_dialogues: list[dict[str, Any]] = field(default_factory=list)
     tool_history: list[ToolExecution] = field(default_factory=list)
 
 
@@ -120,6 +121,7 @@ class AgentRunner:
                 tool_steps=0,
                 progress=initial_batch["progress"],
                 message="all dialogues are already labeled",
+                batch_dialogues=[],
             )
 
         messages = [
@@ -144,6 +146,7 @@ class AgentRunner:
                         tool_steps=step,
                         progress=progress,
                         message="submitted labels for one batch",
+                        batch_dialogues=initial_batch["dialogues"],
                         tool_history=history,
                     )
 
