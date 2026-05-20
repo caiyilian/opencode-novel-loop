@@ -95,6 +95,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Default maximum matches returned by one search_novel tool call.",
     )
     parser.add_argument(
+        "--previous-context-dialogues",
+        type=non_negative_int,
+        default=8,
+        help="Previously labeled neighboring dialogues to include in each batch prompt.",
+    )
+    parser.add_argument(
+        "--following-context-dialogues",
+        type=non_negative_int,
+        default=8,
+        help="Following unlabeled neighboring dialogues to include in each batch prompt.",
+    )
+    parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
         help="OpenAI-compatible model endpoint base URL.",
@@ -171,6 +183,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 context_window_lines=args.context_window_lines,
                 read_window_limit=args.read_window_limit,
                 search_limit=args.search_limit,
+                previous_context_dialogues=args.previous_context_dialogues,
+                following_context_dialogues=args.following_context_dialogues,
             )
         )
         print()
@@ -184,6 +198,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_line_gap=config.threshold,
         read_window_limit=args.read_window_limit,
         search_limit=args.search_limit,
+        previous_context_dialogues=args.previous_context_dialogues,
+        following_context_dialogues=args.following_context_dialogues,
     )
     agent = AgentRunner(
         model_client=OpenAICompatibleClient(model_config),
@@ -236,6 +252,8 @@ def render_dry_run_report(
     context_window_lines: Optional[int] = None,
     read_window_limit: Optional[int] = None,
     search_limit: Optional[int] = None,
+    previous_context_dialogues: Optional[int] = None,
+    following_context_dialogues: Optional[int] = None,
 ) -> str:
     lines = [
         title,
@@ -262,6 +280,10 @@ def render_dry_run_report(
         lines.append(f"  read_window_limit: {read_window_limit}")
     if search_limit is not None:
         lines.append(f"  search_limit: {search_limit}")
+    if previous_context_dialogues is not None:
+        lines.append(f"  previous_context_dialogues: {previous_context_dialogues}")
+    if following_context_dialogues is not None:
+        lines.append(f"  following_context_dialogues: {following_context_dialogues}")
     lines.extend(["", "Environment:"])
     lines.extend(f"  {line}" for line in _format_command_status(python_status))
     return "\n".join(lines)

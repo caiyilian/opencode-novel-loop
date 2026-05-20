@@ -71,6 +71,8 @@ def system_prompt(protocol: str) -> str:
         "如果当前上下文只给出“女孩”“少年”“老人”等临时描述，但这是一个可追踪的具体人物，且后文在有限范围内揭示其姓名或稳定称呼，请使用后文揭示的姓名或稳定称呼。"
         "不要为了无名群体、路人或临时职能角色无限寻找姓名；只有具体人物明显会继续参与场景时，才进行有限的后文确认。"
         "如果引号内容明显不是人物说话，而是叙述中的环境声、物体声音、心理比喻声或声音效果，请标注为“非人物发声”；如果文本明确说明某个角色发出该声音，如喊叫、叹息、笑声或嚎叫，仍标注该角色。"
+        "短句、追问、省略号、沉默或半句话要重点参考相邻对话和最近已标注结果；不要机械沿用上一句说话人。"
+        "相邻对话标签只是连续性线索，如果原文中的“某某说/问/回答”等强证据与标签冲突，以原文为准。"
         "不要直接编辑文件。"
         "提交时必须调用 submit_labels，且 speaker 数量必须等于当前 batch 的对话数量，顺序必须一致。"
         + json_instruction
@@ -92,11 +94,35 @@ def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str
     ]
     for offset, dialogue in enumerate(dialogues, start=1):
         lines.append(f"{offset}. index={dialogue['index']} 行号={dialogue['line_number']} 文本={dialogue['text']}")
+    previous_dialogues = batch_result.get("previous_dialogues", [])
+    if previous_dialogues:
+        lines.extend(
+            [
+                "",
+                "最近已标注对话（来自输出文件，仅作为连续性线索；如果原文强证据冲突，以原文为准）：",
+            ]
+        )
+        for dialogue in previous_dialogues:
+            lines.append(
+                f"- index={dialogue['index']} 行号={dialogue['line_number']} "
+                f"speaker={dialogue['speaker']} 文本={dialogue['text']}"
+            )
+    following_dialogues = batch_result.get("following_dialogues", [])
+    if following_dialogues:
+        lines.extend(
+            [
+                "",
+                "后续未标注对话（只用于判断当前 batch，不要为这些对话提交标签）：",
+            ]
+        )
+        for dialogue in following_dialogues:
+            lines.append(f"- index={dialogue['index']} 行号={dialogue['line_number']} 文本={dialogue['text']}")
     lines.extend(
         [
             "",
             f"第一步请调用 read_novel(start_line={context_start}, end_line={context_end}) 读取上下文。",
             "根据上下文判断说话人；如果遇到可追踪具体人物的身份后置介绍，可以有限读取后文确认姓名或稳定称呼。",
+            "对很短的追问、沉默、省略号或半句话，务必结合前后相邻对话轮次和最近已标注 speaker 判断。",
             "如果需要更多线索，再调用 read_novel 或 search_novel；不要为了普通无名群体无限查找姓名。",
             "最后调用 submit_labels，按上述对话顺序提交简体中文 speaker 标签。",
         ]
@@ -156,11 +182,30 @@ class AgentRunner:
                         batch_dialogues=initial_batch["dialogues"],
                         tool_history=history,
                     )
+            self._maybe_warn_before_step_limit(messages, step)
 
         progress = self.tools.get_progress()
         raise AgentLoopError(
             f"model did not submit labels within {self.config.max_tool_steps} tool step(s); "
-            f"progress remains {progress['labeled']}/{progress['total']}"
+            f"progress remains {progress['labeled']}/{progress['total']}; "
+            f"active batch: {format_batch_summary(initial_batch['dialogues'])}; "
+            f"recent tools: {format_recent_tools(history)}"
+        )
+
+    def _maybe_warn_before_step_limit(self, messages: list[ChatMessage], completed_step: int) -> None:
+        remaining_steps = self.config.max_tool_steps - completed_step
+        if remaining_steps != 1:
+            return
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=(
+                    "Only one model response remains for this batch. "
+                    "If you have enough evidence, call submit_labels now. "
+                    "If evidence is imperfect, submit the best concise speaker label such as 未知 or 非人物发声 "
+                    "instead of continuing to search."
+                ),
+            )
         )
 
     def _chat(self, messages: list[ChatMessage]) -> ChatResult:
@@ -272,6 +317,19 @@ class AgentRunner:
 
 def format_tool_result(result: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+def format_batch_summary(dialogues: list[dict[str, Any]]) -> str:
+    return "; ".join(
+        f"index={dialogue['index']} line={dialogue['line_number']} text={dialogue['text']}"
+        for dialogue in dialogues
+    )
+
+
+def format_recent_tools(history: list[ToolExecution], limit: int = 5) -> str:
+    if not history:
+        return "none"
+    return ", ".join(execution.name for execution in history[-limit:])
 
 
 def format_prompt_messages(messages: list[ChatMessage]) -> str:

@@ -114,6 +114,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("Environment:", output)
         self.assertIn("python: found", output)
         self.assertIn("context_window_lines: 80", output)
+        self.assertIn("previous_context_dialogues: 8", output)
+        self.assertIn("following_context_dialogues: 8", output)
         self.assertIn("Model backend:", output)
         self.assertIn("protocol: json", output)
         self.assertNotIn("OpenCode:", output)

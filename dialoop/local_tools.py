@@ -199,17 +199,25 @@ class DialoopLocalTools:
         max_line_gap: Optional[int] = None,
         read_window_limit: int = 300,
         search_limit: int = 20,
+        previous_context_dialogues: int = 8,
+        following_context_dialogues: int = 8,
     ):
         if batch_size <= 0:
             raise ToolValidationError("batch_size must be greater than 0")
         if max_line_gap is not None and max_line_gap < 0:
             raise ToolValidationError("max_line_gap must be 0 or greater")
+        if previous_context_dialogues < 0:
+            raise ToolValidationError("previous_context_dialogues must be 0 or greater")
+        if following_context_dialogues < 0:
+            raise ToolValidationError("following_context_dialogues must be 0 or greater")
         self.dialogue_index = dialogue_index
         self.label_store = label_store
         self.batch_size = batch_size
         self.max_line_gap = max_line_gap
         self.read_window_limit = read_window_limit
         self.search_limit = search_limit
+        self.previous_context_dialogues = previous_context_dialogues
+        self.following_context_dialogues = following_context_dialogues
         self._active_batch: list[Dialogue] = []
 
     @classmethod
@@ -221,6 +229,8 @@ class DialoopLocalTools:
         max_line_gap: Optional[int] = None,
         read_window_limit: int = 300,
         search_limit: int = 20,
+        previous_context_dialogues: int = 8,
+        following_context_dialogues: int = 8,
     ) -> "DialoopLocalTools":
         return cls(
             dialogue_index=DialogueIndex.from_file(novel_path),
@@ -229,6 +239,8 @@ class DialoopLocalTools:
             max_line_gap=max_line_gap,
             read_window_limit=read_window_limit,
             search_limit=search_limit,
+            previous_context_dialogues=previous_context_dialogues,
+            following_context_dialogues=following_context_dialogues,
         )
 
     def get_progress(self) -> dict[str, Any]:
@@ -246,12 +258,35 @@ class DialoopLocalTools:
         progress = self.get_progress()
         batch = self.dialogue_index.next_batch(progress["labeled"], size, max_line_gap=self.max_line_gap)
         self._active_batch = batch
+        labels = self.label_store.labels()
 
         return {
             "done": len(batch) == 0,
-            "progress": self.get_progress(),
+            "progress": progress,
             "dialogues": [dialogue.to_dict() for dialogue in batch],
+            "previous_dialogues": self._previous_labeled_dialogues(
+                labeled_count=progress["labeled"],
+                labels=labels,
+            ),
+            "following_dialogues": self._following_unlabeled_dialogues(
+                start_index=progress["labeled"] + len(batch),
+            ),
         }
+
+    def _previous_labeled_dialogues(self, labeled_count: int, labels: list[str]) -> list[dict[str, Any]]:
+        start = max(0, labeled_count - self.previous_context_dialogues)
+        end = min(labeled_count, len(labels), self.dialogue_index.total)
+        return [
+            {
+                **self.dialogue_index.dialogues[index].to_dict(),
+                "speaker": labels[index],
+            }
+            for index in range(start, end)
+        ]
+
+    def _following_unlabeled_dialogues(self, start_index: int) -> list[dict[str, Any]]:
+        end = min(self.dialogue_index.total, start_index + self.following_context_dialogues)
+        return [dialogue.to_dict() for dialogue in self.dialogue_index.dialogues[start_index:end]]
 
     def read_novel(self, start_line: int, end_line: int) -> dict[str, Any]:
         return self.dialogue_index.read_lines(
