@@ -5,7 +5,16 @@ import unittest
 from io import StringIO
 from pathlib import Path
 
-from dialoop.agent_loop import AgentLoopConfig, AgentLoopError, AgentRunner, format_prompt_messages
+from dialoop.agent_loop import (
+    AgentLoopConfig,
+    AgentLoopError,
+    AgentRunner,
+    ToolExecution,
+    batch_prompt,
+    format_prompt_messages,
+    format_recent_tools,
+    system_prompt,
+)
 from dialoop.local_tools import DialogueIndex, DialoopLocalTools, LabelStore
 from dialoop.model_client import ChatMessage, ChatResult, ToolCall
 
@@ -142,6 +151,48 @@ class AgentLoopTest(unittest.TestCase):
         self.assertIn("--- system ---\nsystem text", rendered)
         self.assertIn("--- user ---\nuser text", rendered)
 
+    def test_prompt_rules_cover_identity_lookahead_and_non_character_sounds(self) -> None:
+        prompt = system_prompt("auto")
+
+        self.assertIn("有限范围内揭示其姓名或稳定称呼", prompt)
+        self.assertIn("不要为了无名群体", prompt)
+        self.assertIn("非人物发声", prompt)
+        self.assertIn("短句、追问、省略号", prompt)
+
+    def test_batch_prompt_uses_configured_context_window(self) -> None:
+        prompt = batch_prompt(
+            {
+                "progress": {"labeled": 0, "total": 1, "remaining": 1},
+                "dialogues": [{"index": 0, "line_number": 100, "text": "你好。"}],
+            },
+            context_window_lines=40,
+        )
+
+        self.assertIn("read_novel(start_line=60, end_line=140)", prompt)
+
+    def test_batch_prompt_includes_neighbor_dialogues(self) -> None:
+        prompt = batch_prompt(
+            {
+                "progress": {"labeled": 2, "total": 4, "remaining": 2},
+                "dialogues": [{"index": 2, "line_number": 10, "text": "为什么？"}],
+                "previous_dialogues": [
+                    {"index": 0, "line_number": 8, "text": "你好。", "speaker": "甲"},
+                    {"index": 1, "line_number": 9, "text": "你好呀。", "speaker": "乙"},
+                ],
+                "following_dialogues": [{"index": 3, "line_number": 11, "text": "因为如此。"}],
+            },
+            context_window_lines=5,
+        )
+
+        self.assertIn("最近已标注对话", prompt)
+        self.assertIn("speaker=甲", prompt)
+        self.assertIn("后续未标注对话", prompt)
+        self.assertIn("index=3", prompt)
+
+    def test_config_rejects_invalid_context_window(self) -> None:
+        with self.assertRaises(AgentLoopError):
+            AgentLoopConfig(context_window_lines=0)
+
     def test_submit_before_context_is_rejected_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             labels = Path(directory) / "labels.txt"
@@ -187,6 +238,45 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
             self.assertEqual(result.tool_history[0].result["accepted"], False)
             self.assertIn("call read_novel or search_novel", result.tool_history[0].result["error"])
+            self.assertIn("automatic_context", result.tool_history[0].result)
+
+    def test_repeated_submit_before_context_can_recover_without_looping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="early-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="retry-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=2)).run_one_batch()
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(result.tool_steps, 2)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+            self.assertEqual(result.tool_history[0].result["accepted"], False)
+            self.assertIn("automatic_context", result.tool_history[0].result)
+            self.assertEqual(result.tool_history[1].result["accepted"], True)
 
     def test_submit_validation_error_is_returned_to_model_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -298,10 +388,59 @@ class AgentLoopTest(unittest.TestCase):
             tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
             client = FakeModelClient([ChatResult(content="I think it is Lawrence.")])
 
-            with self.assertRaises(AgentLoopError):
+            with self.assertRaises(AgentLoopError) as raised:
                 AgentRunner(client, tools, AgentLoopConfig(protocol="auto", max_tool_steps=1)).run_one_batch()
 
+            self.assertIn("active batch: index=0", str(raised.exception))
+            self.assertIn("recent tools: none", str(raised.exception))
             self.assertEqual(LabelStore(labels).labels(), [])
+
+    def test_warns_before_final_tool_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 1},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=2)).run_one_batch()
+
+            sent_messages = [message.to_dict() for message in client.calls[1]["messages"]]
+            self.assertTrue(
+                any("Only one model response remains" in message["content"] for message in sent_messages)
+            )
+
+    def test_format_recent_tools_includes_error_reason(self) -> None:
+        rendered = format_recent_tools(
+            [
+                ToolExecution("submit_labels", {"accepted": False, "error": "call read_novel first"}),
+                ToolExecution("submit_labels", {"accepted": True}),
+            ]
+        )
+
+        self.assertIn("submit_labels(error=call read_novel first)", rendered)
+        self.assertIn("submit_labels(accepted=true)", rendered)
 
 
 if __name__ == "__main__":

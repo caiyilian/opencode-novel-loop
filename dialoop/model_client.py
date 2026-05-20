@@ -31,7 +31,7 @@ class ModelConfig:
     base_url: str = DEFAULT_BASE_URL
     api_key: str = DEFAULT_API_KEY
     model: str = DEFAULT_MODEL
-    timeout: float = 30.0
+    timeout: float = 60.0
 
 
 @dataclass(frozen=True)

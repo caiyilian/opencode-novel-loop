@@ -74,6 +74,9 @@ def chat_response(message: dict[str, Any]) -> dict[str, Any]:
 
 
 class ModelClientTest(unittest.TestCase):
+    def test_default_timeout_is_long_enough_for_local_models(self) -> None:
+        self.assertEqual(ModelConfig().timeout, 60.0)
+
     def test_chat_posts_openai_compatible_payload_and_parses_content(self) -> None:
         with StubServer(chat_response({"role": "assistant", "content": "OK"})) as server:
             client = OpenAICompatibleClient(ModelConfig(base_url=server.base_url, api_key="secret", model="test-model"))
