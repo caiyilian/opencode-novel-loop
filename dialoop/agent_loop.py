@@ -17,6 +17,7 @@ class AgentLoopError(RuntimeError):
 class AgentLoopConfig:
     protocol: str = "auto"
     max_tool_steps: int = 20
+    context_window_lines: int = 80
     temperature: float = 0.0
     require_context_before_submit: bool = True
 
@@ -25,6 +26,8 @@ class AgentLoopConfig:
             raise AgentLoopError(f"unsupported protocol: {self.protocol}")
         if self.max_tool_steps <= 0:
             raise AgentLoopError("max_tool_steps must be greater than 0")
+        if self.context_window_lines <= 0:
+            raise AgentLoopError("context_window_lines must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -65,19 +68,22 @@ def system_prompt(protocol: str) -> str:
         "优先使用原文中出现的人名、称呼或稳定身份。"
         "如果没有姓名但上下文有身份或群体，请用中文身份词，例如：村民、骑士、店员、商人、众人、未知。"
         "不要用临时行为关系替代更稳定身份；例如上下文说明是村落居民时，用“村民”而不是“顾客”。"
+        "如果当前上下文只给出“女孩”“少年”“老人”等临时描述，但这是一个可追踪的具体人物，且后文在有限范围内揭示其姓名或稳定称呼，请使用后文揭示的姓名或稳定称呼。"
+        "不要为了无名群体、路人或临时职能角色无限寻找姓名；只有具体人物明显会继续参与场景时，才进行有限的后文确认。"
+        "如果引号内容明显不是人物说话，而是叙述中的环境声、物体声音、心理比喻声或声音效果，请标注为“非人物发声”；如果文本明确说明某个角色发出该声音，如喊叫、叹息、笑声或嚎叫，仍标注该角色。"
         "不要直接编辑文件。"
         "提交时必须调用 submit_labels，且 speaker 数量必须等于当前 batch 的对话数量，顺序必须一致。"
         + json_instruction
     )
 
 
-def batch_prompt(batch_result: dict[str, Any]) -> str:
+def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str:
     progress = batch_result["progress"]
     dialogues = batch_result["dialogues"]
     first_line = min(dialogue["line_number"] for dialogue in dialogues)
     last_line = max(dialogue["line_number"] for dialogue in dialogues)
-    context_start = max(1, first_line - 12)
-    context_end = last_line + 12
+    context_start = max(1, first_line - context_window_lines)
+    context_end = last_line + context_window_lines
     lines = [
         "请标注当前对话 batch。",
         f"进度：已标注 {progress['labeled']}/{progress['total']}，剩余 {progress['remaining']}。",
@@ -90,7 +96,8 @@ def batch_prompt(batch_result: dict[str, Any]) -> str:
         [
             "",
             f"第一步请调用 read_novel(start_line={context_start}, end_line={context_end}) 读取上下文。",
-            "根据上下文判断说话人；如果需要更多线索，再调用 read_novel 或 search_novel。",
+            "根据上下文判断说话人；如果遇到可追踪具体人物的身份后置介绍，可以有限读取后文确认姓名或稳定称呼。",
+            "如果需要更多线索，再调用 read_novel 或 search_novel；不要为了普通无名群体无限查找姓名。",
             "最后调用 submit_labels，按上述对话顺序提交简体中文 speaker 标签。",
         ]
     )
@@ -126,7 +133,7 @@ class AgentRunner:
 
         messages = [
             ChatMessage(role="system", content=system_prompt(self.config.protocol)),
-            ChatMessage(role="user", content=batch_prompt(initial_batch)),
+            ChatMessage(role="user", content=batch_prompt(initial_batch, self.config.context_window_lines)),
         ]
         if self.prompt_output is not None:
             print(format_prompt_messages(messages), file=self.prompt_output)

@@ -113,6 +113,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("Dialoop dry run", output)
         self.assertIn("Environment:", output)
         self.assertIn("python: found", output)
+        self.assertIn("context_window_lines: 80", output)
         self.assertIn("Model backend:", output)
         self.assertIn("protocol: json", output)
         self.assertNotIn("OpenCode:", output)
@@ -148,12 +149,22 @@ class CliTest(unittest.TestCase):
             stdout = io.StringIO()
             with patch("dialoop.cli.OpenAICompatibleClient", FakeOpenAICompatibleClient):
                 with redirect_stdout(stdout):
-                    exit_code = main([str(novel_path), "--output", str(output_path), "--show-prompt"])
+                    exit_code = main(
+                        [
+                            str(novel_path),
+                            "--output",
+                            str(output_path),
+                            "--show-prompt",
+                            "--context-window-lines",
+                            "40",
+                        ]
+                    )
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Dialoop prompt:", stdout.getvalue())
         self.assertIn("--- system ---", stdout.getvalue())
         self.assertIn("--- user ---", stdout.getvalue())
+        self.assertIn("read_novel(start_line=1, end_line=41)", stdout.getvalue())
         self.assertIn("Dialoop batch result:", stdout.getvalue())
 
     def test_max_iterations_one_processes_only_one_batch(self) -> None:

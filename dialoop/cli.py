@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum model/tool steps for one dialogue batch.",
     )
     parser.add_argument(
+        "--context-window-lines",
+        type=positive_int,
+        default=80,
+        help="Novel lines before and after the active batch to request in the first read_novel call.",
+    )
+    parser.add_argument(
         "--read-window-limit",
         type=positive_int,
         default=300,
@@ -112,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-timeout",
         type=positive_float,
-        default=30.0,
+        default=60.0,
         help="Timeout in seconds for model endpoint requests.",
     )
     parser.add_argument(
@@ -162,6 +168,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 check_python(),
                 title="Dialoop dry run",
                 max_tool_steps=args.max_tool_steps,
+                context_window_lines=args.context_window_lines,
                 read_window_limit=args.read_window_limit,
                 search_limit=args.search_limit,
             )
@@ -184,6 +191,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config=AgentLoopConfig(
             protocol=args.protocol,
             max_tool_steps=args.max_tool_steps,
+            context_window_lines=args.context_window_lines,
         ),
         prompt_output=sys.stdout if args.show_prompt else None,
     )
@@ -225,6 +233,7 @@ def render_dry_run_report(
     python_status: CommandStatus,
     title: str,
     max_tool_steps: Optional[int] = None,
+    context_window_lines: Optional[int] = None,
     read_window_limit: Optional[int] = None,
     search_limit: Optional[int] = None,
 ) -> str:
@@ -247,6 +256,8 @@ def render_dry_run_report(
     ]
     if max_tool_steps is not None:
         lines.append(f"  max_tool_steps: {max_tool_steps}")
+    if context_window_lines is not None:
+        lines.append(f"  context_window_lines: {context_window_lines}")
     if read_window_limit is not None:
         lines.append(f"  read_window_limit: {read_window_limit}")
     if search_limit is not None:

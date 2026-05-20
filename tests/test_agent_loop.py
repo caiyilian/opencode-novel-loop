@@ -5,7 +5,14 @@ import unittest
 from io import StringIO
 from pathlib import Path
 
-from dialoop.agent_loop import AgentLoopConfig, AgentLoopError, AgentRunner, format_prompt_messages
+from dialoop.agent_loop import (
+    AgentLoopConfig,
+    AgentLoopError,
+    AgentRunner,
+    batch_prompt,
+    format_prompt_messages,
+    system_prompt,
+)
 from dialoop.local_tools import DialogueIndex, DialoopLocalTools, LabelStore
 from dialoop.model_client import ChatMessage, ChatResult, ToolCall
 
@@ -141,6 +148,28 @@ class AgentLoopTest(unittest.TestCase):
 
         self.assertIn("--- system ---\nsystem text", rendered)
         self.assertIn("--- user ---\nuser text", rendered)
+
+    def test_prompt_rules_cover_identity_lookahead_and_non_character_sounds(self) -> None:
+        prompt = system_prompt("auto")
+
+        self.assertIn("有限范围内揭示其姓名或稳定称呼", prompt)
+        self.assertIn("不要为了无名群体", prompt)
+        self.assertIn("非人物发声", prompt)
+
+    def test_batch_prompt_uses_configured_context_window(self) -> None:
+        prompt = batch_prompt(
+            {
+                "progress": {"labeled": 0, "total": 1, "remaining": 1},
+                "dialogues": [{"index": 0, "line_number": 100, "text": "你好。"}],
+            },
+            context_window_lines=40,
+        )
+
+        self.assertIn("read_novel(start_line=60, end_line=140)", prompt)
+
+    def test_config_rejects_invalid_context_window(self) -> None:
+        with self.assertRaises(AgentLoopError):
+            AgentLoopConfig(context_window_lines=0)
 
     def test_submit_before_context_is_rejected_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
