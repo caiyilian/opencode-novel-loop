@@ -9,8 +9,10 @@ from dialoop.agent_loop import (
     AgentLoopConfig,
     AgentLoopError,
     AgentRunner,
+    ToolExecution,
     batch_prompt,
     format_prompt_messages,
+    format_recent_tools,
     system_prompt,
 )
 from dialoop.local_tools import DialogueIndex, DialoopLocalTools, LabelStore
@@ -236,6 +238,45 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
             self.assertEqual(result.tool_history[0].result["accepted"], False)
             self.assertIn("call read_novel or search_novel", result.tool_history[0].result["error"])
+            self.assertIn("automatic_context", result.tool_history[0].result)
+
+    def test_repeated_submit_before_context_can_recover_without_looping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="early-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="retry-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=2)).run_one_batch()
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(result.tool_steps, 2)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+            self.assertEqual(result.tool_history[0].result["accepted"], False)
+            self.assertIn("automatic_context", result.tool_history[0].result)
+            self.assertEqual(result.tool_history[1].result["accepted"], True)
 
     def test_submit_validation_error_is_returned_to_model_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -389,6 +430,17 @@ class AgentLoopTest(unittest.TestCase):
             self.assertTrue(
                 any("Only one model response remains" in message["content"] for message in sent_messages)
             )
+
+    def test_format_recent_tools_includes_error_reason(self) -> None:
+        rendered = format_recent_tools(
+            [
+                ToolExecution("submit_labels", {"accepted": False, "error": "call read_novel first"}),
+                ToolExecution("submit_labels", {"accepted": True}),
+            ]
+        )
+
+        self.assertIn("submit_labels(error=call read_novel first)", rendered)
+        self.assertIn("submit_labels(accepted=true)", rendered)
 
 
 if __name__ == "__main__":

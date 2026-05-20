@@ -299,9 +299,11 @@ class AgentRunner:
                     limit=optional_int(args, "limit"),
                 )
             elif name == "submit_labels":
+                speakers = required_str_list(args, "speakers")
                 if self.config.require_context_before_submit and not self._used_context_tool:
-                    raise ToolValidationError("call read_novel or search_novel before submit_labels")
-                result = self.tools.submit_labels(speakers=required_str_list(args, "speakers"))
+                    result = self._reject_premature_submit_with_context()
+                else:
+                    result = self.tools.submit_labels(speakers=speakers)
             else:
                 raise AgentLoopError(f"unknown tool call: {name}")
         except KeyError as error:
@@ -313,6 +315,18 @@ class AgentRunner:
             self._used_context_tool = True
 
         return ToolExecution(name=name, result=result)
+
+    def _reject_premature_submit_with_context(self) -> dict[str, Any]:
+        context = self.tools.read_active_context(self.config.context_window_lines)
+        self._used_context_tool = True
+        return {
+            "accepted": False,
+            "error": (
+                "call read_novel or search_novel before submit_labels; "
+                "automatic_context is included for this batch, so review it and call submit_labels again"
+            ),
+            "automatic_context": context,
+        }
 
 
 def format_tool_result(result: dict[str, Any]) -> str:
@@ -329,7 +343,23 @@ def format_batch_summary(dialogues: list[dict[str, Any]]) -> str:
 def format_recent_tools(history: list[ToolExecution], limit: int = 5) -> str:
     if not history:
         return "none"
-    return ", ".join(execution.name for execution in history[-limit:])
+    return ", ".join(format_tool_execution_summary(execution) for execution in history[-limit:])
+
+
+def format_tool_execution_summary(execution: ToolExecution) -> str:
+    if "error" in execution.result:
+        return f"{execution.name}(error={shorten_text(str(execution.result['error']), 80)})"
+    if execution.result.get("accepted") is True:
+        return f"{execution.name}(accepted=true)"
+    if execution.result.get("accepted") is False:
+        return f"{execution.name}(accepted=false)"
+    return execution.name
+
+
+def shorten_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
 
 
 def format_prompt_messages(messages: list[ChatMessage]) -> str:

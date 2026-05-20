@@ -295,6 +295,19 @@ class DialoopLocalTools:
             line_limit=self.read_window_limit,
         )
 
+    def read_active_context(self, context_window_lines: int) -> dict[str, Any]:
+        if context_window_lines <= 0:
+            raise ToolValidationError("context_window_lines must be greater than 0")
+        if not self._active_batch:
+            raise ToolValidationError("no active batch; call get_next_dialogue first")
+
+        first_line = min(dialogue.line_number for dialogue in self._active_batch)
+        last_line = max(dialogue.line_number for dialogue in self._active_batch)
+        return self.read_novel(
+            start_line=max(1, first_line - context_window_lines),
+            end_line=last_line + context_window_lines,
+        )
+
     def search_novel(self, keyword: str, limit: Optional[int] = None) -> dict[str, Any]:
         return self.dialogue_index.search(keyword=keyword, limit=limit or self.search_limit)
 
