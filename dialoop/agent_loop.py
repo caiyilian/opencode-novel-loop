@@ -17,6 +17,7 @@ class AgentLoopError(RuntimeError):
 class AgentLoopConfig:
     protocol: str = "auto"
     max_tool_steps: int = 20
+    context_window_lines: int = 80
     temperature: float = 0.0
     require_context_before_submit: bool = True
 
@@ -25,6 +26,8 @@ class AgentLoopConfig:
             raise AgentLoopError(f"unsupported protocol: {self.protocol}")
         if self.max_tool_steps <= 0:
             raise AgentLoopError("max_tool_steps must be greater than 0")
+        if self.context_window_lines <= 0:
+            raise AgentLoopError("context_window_lines must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,7 @@ class AgentBatchResult:
     tool_steps: int
     progress: dict[str, Any]
     message: str
+    batch_dialogues: list[dict[str, Any]] = field(default_factory=list)
     tool_history: list[ToolExecution] = field(default_factory=list)
 
 
@@ -64,19 +68,24 @@ def system_prompt(protocol: str) -> str:
         "优先使用原文中出现的人名、称呼或稳定身份。"
         "如果没有姓名但上下文有身份或群体，请用中文身份词，例如：村民、骑士、店员、商人、众人、未知。"
         "不要用临时行为关系替代更稳定身份；例如上下文说明是村落居民时，用“村民”而不是“顾客”。"
+        "如果当前上下文只给出“女孩”“少年”“老人”等临时描述，但这是一个可追踪的具体人物，且后文在有限范围内揭示其姓名或稳定称呼，请使用后文揭示的姓名或稳定称呼。"
+        "不要为了无名群体、路人或临时职能角色无限寻找姓名；只有具体人物明显会继续参与场景时，才进行有限的后文确认。"
+        "如果引号内容明显不是人物说话，而是叙述中的环境声、物体声音、心理比喻声或声音效果，请标注为“非人物发声”；如果文本明确说明某个角色发出该声音，如喊叫、叹息、笑声或嚎叫，仍标注该角色。"
+        "短句、追问、省略号、沉默或半句话要重点参考相邻对话和最近已标注结果；不要机械沿用上一句说话人。"
+        "相邻对话标签只是连续性线索，如果原文中的“某某说/问/回答”等强证据与标签冲突，以原文为准。"
         "不要直接编辑文件。"
         "提交时必须调用 submit_labels，且 speaker 数量必须等于当前 batch 的对话数量，顺序必须一致。"
         + json_instruction
     )
 
 
-def batch_prompt(batch_result: dict[str, Any]) -> str:
+def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str:
     progress = batch_result["progress"]
     dialogues = batch_result["dialogues"]
     first_line = min(dialogue["line_number"] for dialogue in dialogues)
     last_line = max(dialogue["line_number"] for dialogue in dialogues)
-    context_start = max(1, first_line - 12)
-    context_end = last_line + 12
+    context_start = max(1, first_line - context_window_lines)
+    context_end = last_line + context_window_lines
     lines = [
         "请标注当前对话 batch。",
         f"进度：已标注 {progress['labeled']}/{progress['total']}，剩余 {progress['remaining']}。",
@@ -85,11 +94,36 @@ def batch_prompt(batch_result: dict[str, Any]) -> str:
     ]
     for offset, dialogue in enumerate(dialogues, start=1):
         lines.append(f"{offset}. index={dialogue['index']} 行号={dialogue['line_number']} 文本={dialogue['text']}")
+    previous_dialogues = batch_result.get("previous_dialogues", [])
+    if previous_dialogues:
+        lines.extend(
+            [
+                "",
+                "最近已标注对话（来自输出文件，仅作为连续性线索；如果原文强证据冲突，以原文为准）：",
+            ]
+        )
+        for dialogue in previous_dialogues:
+            lines.append(
+                f"- index={dialogue['index']} 行号={dialogue['line_number']} "
+                f"speaker={dialogue['speaker']} 文本={dialogue['text']}"
+            )
+    following_dialogues = batch_result.get("following_dialogues", [])
+    if following_dialogues:
+        lines.extend(
+            [
+                "",
+                "后续未标注对话（只用于判断当前 batch，不要为这些对话提交标签）：",
+            ]
+        )
+        for dialogue in following_dialogues:
+            lines.append(f"- index={dialogue['index']} 行号={dialogue['line_number']} 文本={dialogue['text']}")
     lines.extend(
         [
             "",
             f"第一步请调用 read_novel(start_line={context_start}, end_line={context_end}) 读取上下文。",
-            "根据上下文判断说话人；如果需要更多线索，再调用 read_novel 或 search_novel。",
+            "根据上下文判断说话人；如果遇到可追踪具体人物的身份后置介绍，可以有限读取后文确认姓名或稳定称呼。",
+            "对很短的追问、沉默、省略号或半句话，务必结合前后相邻对话轮次和最近已标注 speaker 判断。",
+            "如果需要更多线索，再调用 read_novel 或 search_novel；不要为了普通无名群体无限查找姓名。",
             "最后调用 submit_labels，按上述对话顺序提交简体中文 speaker 标签。",
         ]
     )
@@ -120,11 +154,12 @@ class AgentRunner:
                 tool_steps=0,
                 progress=initial_batch["progress"],
                 message="all dialogues are already labeled",
+                batch_dialogues=[],
             )
 
         messages = [
             ChatMessage(role="system", content=system_prompt(self.config.protocol)),
-            ChatMessage(role="user", content=batch_prompt(initial_batch)),
+            ChatMessage(role="user", content=batch_prompt(initial_batch, self.config.context_window_lines)),
         ]
         if self.prompt_output is not None:
             print(format_prompt_messages(messages), file=self.prompt_output)
@@ -144,13 +179,33 @@ class AgentRunner:
                         tool_steps=step,
                         progress=progress,
                         message="submitted labels for one batch",
+                        batch_dialogues=initial_batch["dialogues"],
                         tool_history=history,
                     )
+            self._maybe_warn_before_step_limit(messages, step)
 
         progress = self.tools.get_progress()
         raise AgentLoopError(
             f"model did not submit labels within {self.config.max_tool_steps} tool step(s); "
-            f"progress remains {progress['labeled']}/{progress['total']}"
+            f"progress remains {progress['labeled']}/{progress['total']}; "
+            f"active batch: {format_batch_summary(initial_batch['dialogues'])}; "
+            f"recent tools: {format_recent_tools(history)}"
+        )
+
+    def _maybe_warn_before_step_limit(self, messages: list[ChatMessage], completed_step: int) -> None:
+        remaining_steps = self.config.max_tool_steps - completed_step
+        if remaining_steps != 1:
+            return
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=(
+                    "Only one model response remains for this batch. "
+                    "If you have enough evidence, call submit_labels now. "
+                    "If evidence is imperfect, submit the best concise speaker label such as 未知 or 非人物发声 "
+                    "instead of continuing to search."
+                ),
+            )
         )
 
     def _chat(self, messages: list[ChatMessage]) -> ChatResult:
@@ -244,9 +299,11 @@ class AgentRunner:
                     limit=optional_int(args, "limit"),
                 )
             elif name == "submit_labels":
+                speakers = required_str_list(args, "speakers")
                 if self.config.require_context_before_submit and not self._used_context_tool:
-                    raise ToolValidationError("call read_novel or search_novel before submit_labels")
-                result = self.tools.submit_labels(speakers=required_str_list(args, "speakers"))
+                    result = self._reject_premature_submit_with_context()
+                else:
+                    result = self.tools.submit_labels(speakers=speakers)
             else:
                 raise AgentLoopError(f"unknown tool call: {name}")
         except KeyError as error:
@@ -259,9 +316,50 @@ class AgentRunner:
 
         return ToolExecution(name=name, result=result)
 
+    def _reject_premature_submit_with_context(self) -> dict[str, Any]:
+        context = self.tools.read_active_context(self.config.context_window_lines)
+        self._used_context_tool = True
+        return {
+            "accepted": False,
+            "error": (
+                "call read_novel or search_novel before submit_labels; "
+                "automatic_context is included for this batch, so review it and call submit_labels again"
+            ),
+            "automatic_context": context,
+        }
+
 
 def format_tool_result(result: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+def format_batch_summary(dialogues: list[dict[str, Any]]) -> str:
+    return "; ".join(
+        f"index={dialogue['index']} line={dialogue['line_number']} text={dialogue['text']}"
+        for dialogue in dialogues
+    )
+
+
+def format_recent_tools(history: list[ToolExecution], limit: int = 5) -> str:
+    if not history:
+        return "none"
+    return ", ".join(format_tool_execution_summary(execution) for execution in history[-limit:])
+
+
+def format_tool_execution_summary(execution: ToolExecution) -> str:
+    if "error" in execution.result:
+        return f"{execution.name}(error={shorten_text(str(execution.result['error']), 80)})"
+    if execution.result.get("accepted") is True:
+        return f"{execution.name}(accepted=true)"
+    if execution.result.get("accepted") is False:
+        return f"{execution.name}(accepted=false)"
+    return execution.name
+
+
+def shorten_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
 
 
 def format_prompt_messages(messages: list[ChatMessage]) -> str:

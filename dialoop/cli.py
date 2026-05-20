@@ -68,13 +68,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-iterations",
         type=positive_int,
         default=100,
-        help="Reserved for the future long-running loop. Phase 3 runs one batch per command.",
+        help="Maximum dialogue batches to process in this run.",
     )
     parser.add_argument(
         "--max-tool-steps",
         type=positive_int,
         default=20,
         help="Maximum model/tool steps for one dialogue batch.",
+    )
+    parser.add_argument(
+        "--context-window-lines",
+        type=positive_int,
+        default=80,
+        help="Novel lines before and after the active batch to request in the first read_novel call.",
     )
     parser.add_argument(
         "--read-window-limit",
@@ -87,6 +93,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_int,
         default=20,
         help="Default maximum matches returned by one search_novel tool call.",
+    )
+    parser.add_argument(
+        "--previous-context-dialogues",
+        type=non_negative_int,
+        default=8,
+        help="Previously labeled neighboring dialogues to include in each batch prompt.",
+    )
+    parser.add_argument(
+        "--following-context-dialogues",
+        type=non_negative_int,
+        default=8,
+        help="Following unlabeled neighboring dialogues to include in each batch prompt.",
     )
     parser.add_argument(
         "--base-url",
@@ -112,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-timeout",
         type=positive_float,
-        default=30.0,
+        default=60.0,
         help="Timeout in seconds for model endpoint requests.",
     )
     parser.add_argument(
@@ -162,8 +180,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 check_python(),
                 title="Dialoop dry run",
                 max_tool_steps=args.max_tool_steps,
+                context_window_lines=args.context_window_lines,
                 read_window_limit=args.read_window_limit,
                 search_limit=args.search_limit,
+                previous_context_dialogues=args.previous_context_dialogues,
+                following_context_dialogues=args.following_context_dialogues,
             )
         )
         print()
@@ -177,6 +198,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_line_gap=config.threshold,
         read_window_limit=args.read_window_limit,
         search_limit=args.search_limit,
+        previous_context_dialogues=args.previous_context_dialogues,
+        following_context_dialogues=args.following_context_dialogues,
     )
     agent = AgentRunner(
         model_client=OpenAICompatibleClient(model_config),
@@ -184,16 +207,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config=AgentLoopConfig(
             protocol=args.protocol,
             max_tool_steps=args.max_tool_steps,
+            context_window_lines=args.context_window_lines,
         ),
         prompt_output=sys.stdout if args.show_prompt else None,
     )
 
     try:
-        result = agent.run_one_batch()
+        for iteration in range(1, args.max_iterations + 1):
+            result = agent.run_one_batch()
+            print(render_agent_result(result, iteration=iteration, max_iterations=args.max_iterations))
+            if result.done:
+                print()
+                print("Dialoop run complete.")
+                return 0
+            print()
+    except KeyboardInterrupt:
+        print()
+        print(render_interrupted_result(tools.get_progress()))
+        return 130
     except (AgentLoopError, ModelClientError) as error:
         parser.exit(1, f"dialoop: error: {error}\n")
 
-    print(render_agent_result(result))
+    print(render_iteration_limit_result(args.max_iterations, tools.get_progress()))
     return 0
 
 
@@ -214,8 +249,11 @@ def render_dry_run_report(
     python_status: CommandStatus,
     title: str,
     max_tool_steps: Optional[int] = None,
+    context_window_lines: Optional[int] = None,
     read_window_limit: Optional[int] = None,
     search_limit: Optional[int] = None,
+    previous_context_dialogues: Optional[int] = None,
+    following_context_dialogues: Optional[int] = None,
 ) -> str:
     lines = [
         title,
@@ -236,26 +274,68 @@ def render_dry_run_report(
     ]
     if max_tool_steps is not None:
         lines.append(f"  max_tool_steps: {max_tool_steps}")
+    if context_window_lines is not None:
+        lines.append(f"  context_window_lines: {context_window_lines}")
     if read_window_limit is not None:
         lines.append(f"  read_window_limit: {read_window_limit}")
     if search_limit is not None:
         lines.append(f"  search_limit: {search_limit}")
+    if previous_context_dialogues is not None:
+        lines.append(f"  previous_context_dialogues: {previous_context_dialogues}")
+    if following_context_dialogues is not None:
+        lines.append(f"  following_context_dialogues: {following_context_dialogues}")
     lines.extend(["", "Environment:"])
     lines.extend(f"  {line}" for line in _format_command_status(python_status))
     return "\n".join(lines)
 
 
-def render_agent_result(result: AgentBatchResult) -> str:
+def render_agent_result(
+    result: AgentBatchResult,
+    iteration: Optional[int] = None,
+    max_iterations: Optional[int] = None,
+) -> str:
     lines = [
         "Dialoop batch result:",
         f"  submitted: {str(result.submitted).lower()}",
         f"  done: {str(result.done).lower()}",
         f"  tool_steps: {result.tool_steps}",
         f"  message: {result.message}",
+    ]
+    if iteration is not None and max_iterations is not None:
+        lines.append(f"  iteration: {iteration}/{max_iterations}")
+    if result.batch_dialogues:
+        lines.append("  batch:")
+        for dialogue in result.batch_dialogues:
+            lines.append(f"    - index: {dialogue['index']}, line: {dialogue['line_number']}")
+    lines.extend(
+        [
+            "  progress:",
+            f"    labeled: {result.progress['labeled']}",
+            f"    total: {result.progress['total']}",
+            f"    remaining: {result.progress['remaining']}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_iteration_limit_result(max_iterations: int, progress: dict) -> str:
+    lines = [
+        f"Dialoop stopped after reaching --max-iterations={max_iterations}.",
         "  progress:",
-        f"    labeled: {result.progress['labeled']}",
-        f"    total: {result.progress['total']}",
-        f"    remaining: {result.progress['remaining']}",
+        f"    labeled: {progress['labeled']}",
+        f"    total: {progress['total']}",
+        f"    remaining: {progress['remaining']}",
+    ]
+    return "\n".join(lines)
+
+
+def render_interrupted_result(progress: dict) -> str:
+    lines = [
+        "Dialoop interrupted. Progress already written to the output file is preserved.",
+        "  progress:",
+        f"    labeled: {progress['labeled']}",
+        f"    total: {progress['total']}",
+        f"    remaining: {progress['remaining']}",
     ]
     return "\n".join(lines)
 

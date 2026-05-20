@@ -118,6 +118,51 @@ class DialoopLocalToolsTest(unittest.TestCase):
             self.assertTrue(tools.get_next_dialogue()["done"])
             self.assertIn("2: 罗伦斯说", tools.read_novel(2, 2)["text"])
             self.assertEqual(tools.search_novel("赫萝")["total_matches"], 1)
+
+    def test_get_next_dialogue_includes_neighbor_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            labels.write_text("罗伦斯\n赫萝\n", encoding="utf-8")
+            tools = DialoopLocalTools(
+                DialogueIndex.from_text(SAMPLE_TEXT),
+                LabelStore(labels),
+                batch_size=1,
+                previous_context_dialogues=2,
+                following_context_dialogues=1,
+            )
+
+            next_dialogue = tools.get_next_dialogue()
+
+            self.assertEqual(next_dialogue["dialogues"][0]["text"], "这是最后一件了吧？")
+            self.assertEqual(
+                [(item["text"], item["speaker"]) for item in next_dialogue["previous_dialogues"]],
+                [("你好。", "罗伦斯"), ("你好呀。", "赫萝")],
+            )
+            self.assertEqual([item["text"] for item in next_dialogue["following_dialogues"]], ["下一句。"])
+
+    def test_read_active_context_uses_active_batch_line_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=2)
+            tools.get_next_dialogue()
+
+            context = tools.read_active_context(context_window_lines=1)
+
+            self.assertEqual(context["start_line"], 1)
+            self.assertEqual(context["end_line"], 3)
+            self.assertIn("2: 罗伦斯说", context["text"])
+
+    def test_rejects_negative_neighbor_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+
+            with self.assertRaises(ToolValidationError):
+                DialoopLocalTools(
+                    DialogueIndex.from_text(SAMPLE_TEXT),
+                    LabelStore(labels),
+                    previous_context_dialogues=-1,
+                )
+
     def test_get_next_dialogue_respects_max_line_gap(self) -> None:
         text = "\n".join(
             [
