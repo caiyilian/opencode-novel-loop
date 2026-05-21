@@ -14,6 +14,9 @@ dependencies = []
 
 [project.scripts]
 dialoop = "dialoop.cli:main"
+dialoop-quality = "dialoop.quality_cli:main"
+dialoop-evaluate = "dialoop.quality_cli:evaluate_main"
+dialoop-scan-terms = "dialoop.quality_cli:scan_terms_main"
 
 [tool.setuptools]
 packages = ["dialoop"]
