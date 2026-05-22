@@ -27,6 +27,39 @@ class Dialogue:
         }
 
 
+class SpeakerCountMismatchError(ToolValidationError):
+    def __init__(
+        self,
+        expected_count: int,
+        received_count: int,
+        active_batch: list[Dialogue],
+        received_speakers: list[str],
+    ):
+        self.expected_count = expected_count
+        self.received_count = received_count
+        self.active_batch = active_batch
+        self.received_speakers = received_speakers
+        super().__init__(
+            f"speaker count mismatch: expected {expected_count}, got {received_count}. "
+            "Submit exactly one speaker per active dialogue only; do not submit labels for "
+            "previous_dialogues, following_dialogues, or raw context lines."
+        )
+
+    def to_result(self) -> dict[str, Any]:
+        return {
+            "accepted": False,
+            "error": str(self),
+            "expected_count": self.expected_count,
+            "received_count": self.received_count,
+            "active_dialogues": [dialogue.to_dict() for dialogue in self.active_batch],
+            "received_speakers": self.received_speakers,
+            "instruction": (
+                f"Call submit_labels again with exactly {self.expected_count} speaker(s), "
+                "in active_dialogues order. Ignore previous_dialogues and following_dialogues."
+            ),
+        }
+
+
 @dataclass(frozen=True)
 class SearchMatch:
     line_number: int
@@ -220,6 +253,10 @@ class DialoopLocalTools:
         self.following_context_dialogues = following_context_dialogues
         self._active_batch: list[Dialogue] = []
 
+    @property
+    def active_batch_size(self) -> int:
+        return len(self._active_batch)
+
     @classmethod
     def from_paths(
         cls,
@@ -314,15 +351,41 @@ class DialoopLocalTools:
     def submit_labels(self, speakers: list[str]) -> dict[str, Any]:
         if not self._active_batch:
             raise ToolValidationError("no active batch; call get_next_dialogue first")
-        if len(speakers) != len(self._active_batch):
-            raise ToolValidationError(
-                f"speaker count mismatch: expected {len(self._active_batch)}, got {len(speakers)}"
+        expected_count = len(self._active_batch)
+        received_count = len(speakers)
+        warning = None
+        ignored_speakers: list[str] = []
+
+        if received_count < expected_count:
+            raise SpeakerCountMismatchError(
+                expected_count=expected_count,
+                received_count=received_count,
+                active_batch=list(self._active_batch),
+                received_speakers=speakers,
+            )
+        if received_count > expected_count:
+            ignored_speakers = speakers[expected_count:]
+            speakers = speakers[:expected_count]
+            warning = (
+                f"received {received_count} speakers for {expected_count} active dialogue(s); "
+                f"wrote the first {expected_count} and ignored {len(ignored_speakers)} extra speaker(s). "
+                "Only the active batch is accepted; following context labels are ignored."
             )
 
         written = self.label_store.append(speakers)
         self._active_batch = []
-        return {
+        result = {
             "accepted": True,
             "written": written,
             "progress": self.get_progress(),
         }
+        if warning is not None:
+            result.update(
+                {
+                    "warning": warning,
+                    "expected_count": expected_count,
+                    "received_count": received_count,
+                    "ignored_speakers": ignored_speakers,
+                }
+            )
+        return result

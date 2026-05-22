@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional, TextIO
 
-from .local_tools import DialoopLocalTools, ToolValidationError
+from .local_tools import DialoopLocalTools, SpeakerCountMismatchError, ToolValidationError
 from .model_client import ChatMessage, ChatResult, ToolCall
 from .protocol import JsonAction, ProtocolError, local_tool_specs, parse_json_action
 
@@ -89,6 +89,10 @@ def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str
     lines = [
         "请标注当前对话 batch。",
         f"进度：已标注 {progress['labeled']}/{progress['total']}，剩余 {progress['remaining']}。",
+        (
+            f"本次 submit_labels 必须且只能提交 {len(dialogues)} 个 speaker；"
+            "不要提交最近已标注或后续未标注对话的 speaker。"
+        ),
         "",
         "当前对话：",
     ]
@@ -178,7 +182,7 @@ class AgentRunner:
                         done=progress["remaining"] == 0,
                         tool_steps=step,
                         progress=progress,
-                        message="submitted labels for one batch",
+                        message=accepted_submit_message(execution.result),
                         batch_dialogues=initial_batch["dialogues"],
                         tool_history=history,
                     )
@@ -209,7 +213,12 @@ class AgentRunner:
         )
 
     def _chat(self, messages: list[ChatMessage]) -> ChatResult:
-        tools = None if self.config.protocol == "json" else local_tool_specs()
+        submit_label_count = self.tools.active_batch_size or None
+        tools = (
+            None
+            if self.config.protocol == "json"
+            else local_tool_specs(submit_label_count=submit_label_count)
+        )
         return self.model_client.chat(
             messages=messages,
             tools=tools,
@@ -308,6 +317,8 @@ class AgentRunner:
                 raise AgentLoopError(f"unknown tool call: {name}")
         except KeyError as error:
             result = {"accepted": False, "error": f"missing required argument: {error.args[0]}"}
+        except SpeakerCountMismatchError as error:
+            result = error.to_result()
         except ToolValidationError as error:
             result = {"accepted": False, "error": str(error)}
 
@@ -331,6 +342,12 @@ class AgentRunner:
 
 def format_tool_result(result: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+def accepted_submit_message(result: dict[str, Any]) -> str:
+    if "warning" not in result:
+        return "submitted labels for one batch"
+    return f"submitted labels for one batch with recovery: {result['warning']}"
 
 
 def format_batch_summary(dialogues: list[dict[str, Any]]) -> str:

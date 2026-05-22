@@ -18,6 +18,14 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(schema[0]["type"], "function")
         self.assertIn("parameters", schema[0]["function"])
 
+    def test_submit_labels_schema_can_pin_active_batch_count(self) -> None:
+        specs = local_tool_specs(submit_label_count=2)
+        submit = next(spec for spec in specs if spec.name == "submit_labels")
+        speakers = submit.parameters["properties"]["speakers"]
+
+        self.assertEqual(speakers["minItems"], 2)
+        self.assertEqual(speakers["maxItems"], 2)
+
     def test_parse_json_action_from_plain_json(self) -> None:
         action = parse_json_action('{"action":"read_novel","args":{"start_line":1,"end_line":3}}')
 
