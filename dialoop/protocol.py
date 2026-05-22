@@ -32,7 +32,15 @@ class JsonAction:
     args: dict[str, Any]
 
 
-def local_tool_specs() -> list[ToolSpec]:
+def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
+    speaker_items_schema: dict[str, Any] = {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+        "minItems": submit_label_count or 1,
+    }
+    if submit_label_count is not None:
+        speaker_items_schema["maxItems"] = submit_label_count
+
     return [
         ToolSpec(
             name="get_next_dialogue",
@@ -77,15 +85,14 @@ def local_tool_specs() -> list[ToolSpec]:
         ),
         ToolSpec(
             name="submit_labels",
-            description="Submit one speaker name for each dialogue in the active batch, in order.",
+            description=(
+                "Submit one speaker name for each dialogue in the active batch, in order. "
+                "Do not include labels for previous_dialogues, following_dialogues, or raw context lines."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "speakers": {
-                        "type": "array",
-                        "items": {"type": "string", "minLength": 1},
-                        "minItems": 1,
-                    }
+                    "speakers": speaker_items_schema
                 },
                 "required": ["speakers"],
                 "additionalProperties": False,

@@ -77,6 +77,8 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(result.tool_steps, 2)
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
             self.assertIsNotNone(client.calls[0]["tools"])
+            submit_spec = next(spec for spec in client.calls[0]["tools"] if spec.name == "submit_labels")
+            self.assertEqual(submit_spec.parameters["properties"]["speakers"]["maxItems"], 1)
             sent_messages = [message.to_dict() for message in client.calls[1]["messages"]]
             self.assertIn("简体中文", sent_messages[0]["content"])
             self.assertIn("第一步请调用 read_novel", sent_messages[1]["content"])
@@ -169,6 +171,7 @@ class AgentLoopTest(unittest.TestCase):
         )
 
         self.assertIn("read_novel(start_line=60, end_line=140)", prompt)
+        self.assertIn("必须且只能提交 1 个 speaker", prompt)
 
     def test_batch_prompt_includes_neighbor_dialogues(self) -> None:
         prompt = batch_prompt(
@@ -323,6 +326,45 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence", "Holo"])
             self.assertEqual(result.tool_history[1].result["accepted"], False)
             self.assertIn("speaker count mismatch", result.tool_history[1].result["error"])
+            self.assertEqual(result.tool_history[1].result["expected_count"], 2)
+
+    def test_extra_submit_labels_are_recovered_by_using_active_batch_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="extra-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence", "Holo", "Narrator"]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=3)).run_one_batch()
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(result.tool_steps, 2)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+            self.assertIn("with recovery", result.message)
+            self.assertEqual(result.tool_history[1].result["accepted"], True)
+            self.assertEqual(result.tool_history[1].result["ignored_speakers"], ["Holo", "Narrator"])
 
     def test_bad_tool_argument_type_is_returned_to_model_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

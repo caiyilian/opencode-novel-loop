@@ -109,6 +109,22 @@ class DialoopLocalToolsTest(unittest.TestCase):
             self.assertEqual(result["progress"]["labeled"], 2)
             self.assertEqual(LabelStore(labels).labels(), ["罗伦斯", "赫萝"])
 
+    def test_submit_labels_recovers_from_extra_speakers_by_keeping_active_batch_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            tools.get_next_dialogue()
+
+            result = tools.submit_labels(["罗伦斯", "赫萝", "村民"])
+
+            self.assertTrue(result["accepted"])
+            self.assertEqual(result["written"], 1)
+            self.assertEqual(result["expected_count"], 1)
+            self.assertEqual(result["received_count"], 3)
+            self.assertEqual(result["ignored_speakers"], ["赫萝", "村民"])
+            self.assertIn("ignored 2 extra", result["warning"])
+            self.assertEqual(LabelStore(labels).labels(), ["罗伦斯"])
+
     def test_tools_read_search_and_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             labels = Path(directory) / "labels.txt"
