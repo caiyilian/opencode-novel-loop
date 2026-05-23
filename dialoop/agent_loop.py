@@ -13,6 +13,18 @@ class AgentLoopError(RuntimeError):
     """Raised when a batch cannot be completed by the agent loop."""
 
 
+SUBMIT_LABEL_ALIASES = (
+    "speakers",
+    "speaker",
+    "speaker_names",
+    "speaker_name",
+    "labels",
+    "label",
+    "names",
+    "name",
+)
+
+
 @dataclass(frozen=True)
 class AgentLoopConfig:
     protocol: str = "auto"
@@ -243,7 +255,9 @@ class AgentRunner:
                     tool_calls=[call.to_openai_tool_call() for call in response.tool_calls],
                 )
             )
-            return [self._execute_native_tool_call(messages, call) for call in response.tool_calls]
+            executions = [self._execute_native_tool_call(messages, call) for call in response.tool_calls]
+            self._append_retry_messages(messages, executions)
+            return executions
 
         messages.append(ChatMessage(role="assistant", content=response.content))
 
@@ -257,6 +271,7 @@ class AgentRunner:
                         content=f"Tool result for {execution.name}: {format_tool_result(execution.result)}",
                     )
                 )
+                self._append_retry_messages(messages, [execution])
                 return [execution]
 
         messages.append(
@@ -293,6 +308,12 @@ class AgentRunner:
     def _execute_json_action(self, action: JsonAction) -> ToolExecution:
         return self._execute_tool(action.action, action.args)
 
+    def _append_retry_messages(self, messages: list[ChatMessage], executions: list[ToolExecution]) -> None:
+        for execution in executions:
+            retry_message = submit_retry_message(execution)
+            if retry_message is not None:
+                messages.append(ChatMessage(role="user", content=retry_message))
+
     def _execute_tool(self, name: str, args: dict[str, Any]) -> ToolExecution:
         try:
             if name == "get_next_dialogue":
@@ -308,11 +329,7 @@ class AgentRunner:
                     limit=optional_int(args, "limit"),
                 )
             elif name == "submit_labels":
-                speakers = required_str_list(args, "speakers")
-                if self.config.require_context_before_submit and not self._used_context_tool:
-                    result = self._reject_premature_submit_with_context()
-                else:
-                    result = self.tools.submit_labels(speakers=speakers)
+                result = self._execute_submit_labels(args)
             else:
                 raise AgentLoopError(f"unknown tool call: {name}")
         except KeyError as error:
@@ -326,6 +343,20 @@ class AgentRunner:
             self._used_context_tool = True
 
         return ToolExecution(name=name, result=result)
+
+    def _execute_submit_labels(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            speakers = submit_speakers_from_args(args, self.tools.active_batch_size)
+        except ToolValidationError as error:
+            return submit_labels_argument_error(
+                error=str(error),
+                args=args,
+                expected_count=self.tools.active_batch_size,
+            )
+
+        if self.config.require_context_before_submit and not self._used_context_tool:
+            return self._reject_premature_submit_with_context()
+        return self.tools.submit_labels(speakers=speakers)
 
     def _reject_premature_submit_with_context(self) -> dict[str, Any]:
         context = self.tools.read_active_context(self.config.context_window_lines)
@@ -348,6 +379,17 @@ def accepted_submit_message(result: dict[str, Any]) -> str:
     if "warning" not in result:
         return "submitted labels for one batch"
     return f"submitted labels for one batch with recovery: {result['warning']}"
+
+
+def submit_retry_message(execution: ToolExecution) -> Optional[str]:
+    if execution.name != "submit_labels":
+        return None
+    if execution.result.get("accepted") is not False:
+        return None
+    instruction = execution.result.get("instruction")
+    if not isinstance(instruction, str) or not instruction:
+        return None
+    return instruction
 
 
 def format_batch_summary(dialogues: list[dict[str, Any]]) -> str:
@@ -417,3 +459,39 @@ def required_str_list(args: dict[str, Any], name: str) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ToolValidationError(f"{name} must be a list of strings")
     return value
+
+
+def submit_speakers_from_args(args: dict[str, Any], expected_count: int) -> list[str]:
+    for name in SUBMIT_LABEL_ALIASES:
+        if name in args:
+            return coerce_speaker_argument(args[name], name, expected_count)
+    raise ToolValidationError("missing required argument: speakers")
+
+
+def coerce_speaker_argument(value: Any, name: str, expected_count: int) -> list[str]:
+    if isinstance(value, list):
+        if any(not isinstance(item, str) for item in value):
+            raise ToolValidationError(f"{name} must be a list of strings")
+        return value
+    if isinstance(value, str) and expected_count == 1:
+        return [value]
+    if isinstance(value, str):
+        raise ToolValidationError(f"{name} must be a list of strings for {expected_count} speakers")
+    raise ToolValidationError(f"{name} must be a list of strings")
+
+
+def submit_labels_argument_error(error: str, args: dict[str, Any], expected_count: int) -> dict[str, Any]:
+    example_speakers = ["<speaker>"] * max(1, expected_count)
+    example_args = {"speakers": example_speakers}
+    return {
+        "accepted": False,
+        "error": error,
+        "expected_count": expected_count,
+        "received_arguments": args,
+        "expected_arguments": example_args,
+        "instruction": (
+            "Retry submit_labels now with arguments exactly like "
+            f"{json.dumps(example_args, ensure_ascii=False)}. "
+            "Use the key `speakers`; it must contain one speaker per active dialogue."
+        ),
+    }

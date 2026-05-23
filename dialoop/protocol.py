@@ -87,6 +87,7 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
             name="submit_labels",
             description=(
                 "Submit one speaker name for each dialogue in the active batch, in order. "
+                'Arguments must use the exact shape {"speakers":["speaker1", "..."]}. '
                 "Do not include labels for previous_dialogues, following_dialogues, or raw context lines."
             ),
             parameters={

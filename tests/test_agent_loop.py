@@ -366,6 +366,89 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(result.tool_history[1].result["accepted"], True)
             self.assertEqual(result.tool_history[1].result["ignored_speakers"], ["Holo", "Narrator"])
 
+    def test_missing_submit_speakers_argument_gets_retry_instruction_and_can_recover(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 1},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="missing-speakers",
+                                name="submit_labels",
+                                arguments={},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="good-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=3)).run_one_batch()
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+            self.assertEqual(result.tool_history[1].result["accepted"], False)
+            self.assertIn("missing required argument: speakers", result.tool_history[1].result["error"])
+            self.assertEqual(result.tool_history[1].result["expected_arguments"], {"speakers": ["<speaker>"]})
+            sent_messages = [message.to_dict() for message in client.calls[2]["messages"]]
+            self.assertTrue(any("Retry submit_labels now" in message["content"] for message in sent_messages))
+
+    def test_single_dialogue_submit_accepts_speaker_alias_string(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 1},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="alias-submit",
+                                name="submit_labels",
+                                arguments={"speaker": "Lawrence"},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=2)).run_one_batch()
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+
     def test_bad_tool_argument_type_is_returned_to_model_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             labels = Path(directory) / "labels.txt"
@@ -388,7 +471,7 @@ class AgentLoopTest(unittest.TestCase):
                             ToolCall(
                                 id="bad-submit",
                                 name="submit_labels",
-                                arguments={"speakers": "Lawrence"},
+                                arguments={"speakers": 123},
                             )
                         ],
                     ),
