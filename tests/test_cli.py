@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -141,6 +142,33 @@ class CliTest(unittest.TestCase):
         self.assertIn("iteration: 1/100", stdout.getvalue())
         self.assertIn("index: 0, line: 1", stdout.getvalue())
         self.assertEqual(labels_text, "Lawrence\n")
+
+    def test_run_writes_annotations_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            novel_path = Path(temp_dir) / "novel.txt"
+            output_path = Path(temp_dir) / "labels.txt"
+            annotations_path = Path(temp_dir) / "custom" / "annotations.jsonl"
+            novel_path.write_text("Lawrence said: \u300cHello.\u300d\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with patch("dialoop.cli.OpenAICompatibleClient", FakeOpenAICompatibleClient):
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            str(novel_path),
+                            "--output",
+                            str(output_path),
+                            "--annotations-output",
+                            str(annotations_path),
+                        ]
+                    )
+            annotation = json.loads(annotations_path.read_text(encoding="utf-8").splitlines()[0])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(annotation["speaker"], "Lawrence")
+        self.assertEqual(annotation["line_number"], 1)
+        self.assertEqual(annotation["evidence_lines"], [1])
+        self.assertIn("annotations_written: 1", stdout.getvalue())
 
     def test_show_prompt_prints_prompt_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -88,12 +88,58 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
             description=(
                 "Submit one speaker name for each dialogue in the active batch, in order. "
                 'Arguments must use the exact shape {"speakers":["speaker1", "..."]}. '
+                "When possible, include evidence_lines, reason, rejected_candidates, and confidence. "
                 "Do not include labels for previous_dialogues, following_dialogues, or raw context lines."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "speakers": speaker_items_schema
+                    "speakers": speaker_items_schema,
+                    "evidence_lines": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "description": "1-based novel line numbers that support the submitted speaker label(s).",
+                    },
+                    "evidence_lines_by_dialogue": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 1},
+                        },
+                        "description": "Optional per-dialogue evidence line numbers, aligned with speakers.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Short reason for the submitted speaker label(s).",
+                    },
+                    "reasons": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional per-dialogue reasons, aligned with speakers.",
+                    },
+                    "rejected_candidates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Speaker candidates considered but rejected.",
+                    },
+                    "rejected_candidates_by_dialogue": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "description": "Optional per-dialogue rejected candidates, aligned with speakers.",
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                        "description": "Confidence in the submitted speaker label(s).",
+                    },
+                    "confidences": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "description": "Optional per-dialogue confidence values, aligned with speakers.",
+                    },
                 },
                 "required": ["speakers"],
                 "additionalProperties": False,

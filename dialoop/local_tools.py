@@ -372,11 +372,13 @@ class DialoopLocalTools:
                 "Only the active batch is accepted; following context labels are ignored."
             )
 
+        cleaned_speakers = [speaker.strip() for speaker in speakers]
         written = self.label_store.append(speakers)
         self._active_batch = []
         result = {
             "accepted": True,
             "written": written,
+            "speakers": cleaned_speakers,
             "progress": self.get_progress(),
         }
         if warning is not None:
