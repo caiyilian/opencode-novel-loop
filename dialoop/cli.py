@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .agent_loop import AgentBatchResult, AgentLoopConfig, AgentLoopError, AgentRunner
+from .annotations import AnnotationStore
 from .environment import CommandStatus, check_python
 from .local_tools import DialoopLocalTools
 from .model_client import (
@@ -51,6 +52,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("labeled.txt"),
         help="Path for speaker labels. Relative paths resolve from the novel directory.",
+    )
+    parser.add_argument(
+        "--annotations-output",
+        type=Path,
+        default=Path(".dialoop") / "annotations.jsonl",
+        help="Path for JSONL annotation evidence. Relative paths resolve from the novel directory.",
+    )
+    parser.add_argument(
+        "--no-annotations",
+        action="store_true",
+        help="Disable annotations.jsonl writing for this run.",
     )
     parser.add_argument(
         "--batch-size",
@@ -172,6 +184,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         model=args.model,
         timeout=args.model_timeout,
     )
+    annotations_path = _resolve_path_from_workdir(args.annotations_output, config.workdir)
 
     if args.dry_run:
         print(
@@ -179,6 +192,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 config,
                 check_python(),
                 title="Dialoop dry run",
+                annotations_path=None if args.no_annotations else annotations_path,
                 max_tool_steps=args.max_tool_steps,
                 context_window_lines=args.context_window_lines,
                 read_window_limit=args.read_window_limit,
@@ -210,6 +224,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             context_window_lines=args.context_window_lines,
         ),
         prompt_output=sys.stdout if args.show_prompt else None,
+        annotation_store=None if args.no_annotations else AnnotationStore(annotations_path),
     )
 
     try:
@@ -244,10 +259,18 @@ def _format_command_status(status: CommandStatus) -> list[str]:
     return lines
 
 
+def _resolve_path_from_workdir(path: Path, workdir: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return (workdir / expanded).resolve()
+
+
 def render_dry_run_report(
     config: DialoopConfig,
     python_status: CommandStatus,
     title: str,
+    annotations_path: Optional[Path] = None,
     max_tool_steps: Optional[int] = None,
     context_window_lines: Optional[int] = None,
     read_window_limit: Optional[int] = None,
@@ -261,6 +284,7 @@ def render_dry_run_report(
         "Paths:",
         f"  novel: {config.novel_path}",
         f"  output: {config.output_path}",
+        f"  annotations: {annotations_path if annotations_path is not None else 'disabled'}",
         f"  workdir: {config.workdir}",
         "",
         "Local tools:",
@@ -300,6 +324,7 @@ def render_agent_result(
         f"  done: {str(result.done).lower()}",
         f"  tool_steps: {result.tool_steps}",
         f"  message: {result.message}",
+        f"  annotations_written: {result.annotations_written}",
     ]
     if iteration is not None and max_iterations is not None:
         lines.append(f"  iteration: {iteration}/{max_iterations}")

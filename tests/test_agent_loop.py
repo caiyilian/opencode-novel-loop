@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from io import StringIO
@@ -15,6 +16,7 @@ from dialoop.agent_loop import (
     format_recent_tools,
     system_prompt,
 )
+from dialoop.annotations import AnnotationStore
 from dialoop.local_tools import DialogueIndex, DialoopLocalTools, LabelStore
 from dialoop.model_client import ChatMessage, ChatResult, ToolCall
 
@@ -85,6 +87,108 @@ class AgentLoopTest(unittest.TestCase):
             self.assertIn("tool_calls", sent_messages[2])
             self.assertEqual(sent_messages[3]["role"], "tool")
             self.assertEqual(sent_messages[3]["tool_call_id"], "call-read")
+
+    def test_agent_writes_annotation_for_successful_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / ".dialoop" / "annotations.jsonl"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-submit",
+                                name="submit_labels",
+                                arguments={
+                                    "speakers": ["Lawrence"],
+                                    "evidence_lines": [1],
+                                    "reason": "The narration says Lawrence said it.",
+                                    "rejected_candidates": ["Holo"],
+                                    "confidence": "high",
+                                },
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=3),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            annotation = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
+
+            self.assertEqual(result.annotations_written, 1)
+            self.assertEqual(annotation["speaker"], "Lawrence")
+            self.assertEqual(annotation["evidence_lines"], [1])
+            self.assertEqual(annotation["reason"], "The narration says Lawrence said it.")
+            self.assertEqual(annotation["rejected_candidates"], ["Holo"])
+            self.assertEqual(annotation["confidence"], "high")
+            self.assertEqual(annotation["tool_summary"]["read_novel"][0]["requested_start_line"], 1)
+
+    def test_agent_writes_multi_dialogue_annotations_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=2)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-submit",
+                                name="submit_labels",
+                                arguments={
+                                    "speakers": ["Lawrence", "Holo"],
+                                    "evidence_lines_by_dialogue": [[1], [2]],
+                                    "reasons": ["Lawrence is named.", "Holo answered."],
+                                    "rejected_candidates_by_dialogue": [["Holo"], ["Lawrence"]],
+                                    "confidences": ["high", "medium"],
+                                },
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=3),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            rows = [json.loads(line) for line in annotations.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(result.annotations_written, 2)
+            self.assertEqual([row["speaker"] for row in rows], ["Lawrence", "Holo"])
+            self.assertEqual([row["line_number"] for row in rows], [1, 2])
+            self.assertEqual(rows[1]["evidence_lines"], [2])
+            self.assertEqual(rows[1]["confidence"], "medium")
 
     def test_json_action_loop_submits_labels_without_native_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -331,6 +435,7 @@ class AgentLoopTest(unittest.TestCase):
     def test_extra_submit_labels_are_recovered_by_using_active_batch_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
             tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
             client = FakeModelClient(
                 [
@@ -357,7 +462,13 @@ class AgentLoopTest(unittest.TestCase):
                 ]
             )
 
-            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=3)).run_one_batch()
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=3),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            annotation = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
 
             self.assertTrue(result.submitted)
             self.assertEqual(result.tool_steps, 2)
@@ -365,6 +476,9 @@ class AgentLoopTest(unittest.TestCase):
             self.assertIn("with recovery", result.message)
             self.assertEqual(result.tool_history[1].result["accepted"], True)
             self.assertEqual(result.tool_history[1].result["ignored_speakers"], ["Holo", "Narrator"])
+            self.assertEqual(annotation["speaker"], "Lawrence")
+            self.assertEqual(annotation["recovery"]["ignored_speakers"], ["Holo", "Narrator"])
+            self.assertEqual(annotation["tool_summary"]["submit_labels"][0]["ignored_speakers"], ["Holo", "Narrator"])
 
     def test_missing_submit_speakers_argument_gets_retry_instruction_and_can_recover(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

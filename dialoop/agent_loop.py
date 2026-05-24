@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional, TextIO
 
+from .annotations import AnnotationStore, build_annotation_records
 from .local_tools import DialoopLocalTools, SpeakerCountMismatchError, ToolValidationError
 from .model_client import ChatMessage, ChatResult, ToolCall
 from .protocol import JsonAction, ProtocolError, local_tool_specs, parse_json_action
@@ -46,6 +47,7 @@ class AgentLoopConfig:
 class ToolExecution:
     name: str
     result: dict[str, Any]
+    arguments: dict[str, Any] = field(default_factory=dict)
 
     @property
     def accepted_submit(self) -> bool:
@@ -61,6 +63,7 @@ class AgentBatchResult:
     message: str
     batch_dialogues: list[dict[str, Any]] = field(default_factory=list)
     tool_history: list[ToolExecution] = field(default_factory=list)
+    annotations_written: int = 0
 
 
 def system_prompt(protocol: str) -> str:
@@ -87,6 +90,8 @@ def system_prompt(protocol: str) -> str:
         "相邻对话标签只是连续性线索，如果原文中的“某某说/问/回答”等强证据与标签冲突，以原文为准。"
         "不要直接编辑文件。"
         "提交时必须调用 submit_labels，且 speaker 数量必须等于当前 batch 的对话数量，顺序必须一致。"
+        "如果可以判断依据，请在 submit_labels 参数中同时提供 evidence_lines、reason、rejected_candidates 和 confidence。"
+        "confidence 只能是 high、medium 或 low。"
         + json_instruction
     )
 
@@ -140,7 +145,10 @@ def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str
             "根据上下文判断说话人；如果遇到可追踪具体人物的身份后置介绍，可以有限读取后文确认姓名或稳定称呼。",
             "对很短的追问、沉默、省略号或半句话，务必结合前后相邻对话轮次和最近已标注 speaker 判断。",
             "如果需要更多线索，再调用 read_novel 或 search_novel；不要为了普通无名群体无限查找姓名。",
-            "最后调用 submit_labels，按上述对话顺序提交简体中文 speaker 标签。",
+            (
+                "最后调用 submit_labels，按上述对话顺序提交简体中文 speaker 标签；"
+                "尽量一并提供 evidence_lines、reason、rejected_candidates 和 confidence。"
+            ),
         ]
     )
     return "\n".join(lines)
@@ -153,11 +161,13 @@ class AgentRunner:
         tools: DialoopLocalTools,
         config: Optional[AgentLoopConfig] = None,
         prompt_output: Optional[TextIO] = None,
+        annotation_store: Optional[AnnotationStore] = None,
     ):
         self.model_client = model_client
         self.tools = tools
         self.config = config or AgentLoopConfig()
         self.prompt_output = prompt_output
+        self.annotation_store = annotation_store
         self._used_context_tool = False
 
     def run_one_batch(self) -> AgentBatchResult:
@@ -189,6 +199,11 @@ class AgentRunner:
             for execution in executions:
                 if execution.accepted_submit:
                     progress = execution.result["progress"]
+                    annotations_written = self._write_annotations(
+                        dialogues=initial_batch["dialogues"],
+                        accepted_submit=execution,
+                        history=history,
+                    )
                     return AgentBatchResult(
                         submitted=True,
                         done=progress["remaining"] == 0,
@@ -197,6 +212,7 @@ class AgentRunner:
                         message=accepted_submit_message(execution.result),
                         batch_dialogues=initial_batch["dialogues"],
                         tool_history=history,
+                        annotations_written=annotations_written,
                     )
             self._maybe_warn_before_step_limit(messages, step)
 
@@ -342,7 +358,29 @@ class AgentRunner:
         if name in {"read_novel", "search_novel"} and "error" not in result:
             self._used_context_tool = True
 
-        return ToolExecution(name=name, result=result)
+        return ToolExecution(name=name, result=result, arguments=dict(args))
+
+    def _write_annotations(
+        self,
+        dialogues: list[dict[str, Any]],
+        accepted_submit: ToolExecution,
+        history: list[ToolExecution],
+    ) -> int:
+        if self.annotation_store is None:
+            return 0
+
+        speakers = accepted_submit.result.get("speakers", [])
+        if not isinstance(speakers, list) or any(not isinstance(item, str) for item in speakers):
+            return 0
+
+        records = build_annotation_records(
+            dialogues=dialogues,
+            speakers=speakers,
+            submit_args=accepted_submit.arguments,
+            tool_summary=summarize_tool_history(history),
+            recovery=submit_recovery_info(accepted_submit.result),
+        )
+        return self.annotation_store.append(records)
 
     def _execute_submit_labels(self, args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -390,6 +428,57 @@ def submit_retry_message(execution: ToolExecution) -> Optional[str]:
     if not isinstance(instruction, str) or not instruction:
         return None
     return instruction
+
+
+def summarize_tool_history(history: list[ToolExecution]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "read_novel": [],
+        "search_novel": [],
+        "submit_labels": [],
+    }
+
+    for execution in history:
+        if execution.name == "read_novel":
+            summary["read_novel"].append(
+                {
+                    "requested_start_line": execution.arguments.get("start_line"),
+                    "requested_end_line": execution.arguments.get("end_line"),
+                    "start_line": execution.result.get("start_line"),
+                    "end_line": execution.result.get("end_line"),
+                    "truncated": execution.result.get("truncated", False),
+                }
+            )
+        elif execution.name == "search_novel":
+            summary["search_novel"].append(
+                {
+                    "keyword": execution.arguments.get("keyword"),
+                    "limit": execution.arguments.get("limit"),
+                    "total_matches": execution.result.get("total_matches"),
+                    "truncated": execution.result.get("truncated", False),
+                }
+            )
+        elif execution.name == "submit_labels":
+            summary["submit_labels"].append(
+                {
+                    "accepted": execution.result.get("accepted"),
+                    "error": execution.result.get("error"),
+                    "warning": execution.result.get("warning"),
+                    "expected_count": execution.result.get("expected_count"),
+                    "received_count": execution.result.get("received_count"),
+                    "ignored_speakers": execution.result.get("ignored_speakers"),
+                }
+            )
+
+    return summary
+
+
+def submit_recovery_info(result: dict[str, Any]) -> Optional[dict[str, Any]]:
+    recovery = {
+        key: result[key]
+        for key in ("warning", "expected_count", "received_count", "ignored_speakers")
+        if key in result
+    }
+    return recovery or None
 
 
 def format_batch_summary(dialogues: list[dict[str, Any]]) -> str:
