@@ -119,6 +119,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("following_context_dialogues: 8", output)
         self.assertIn("Model backend:", output)
         self.assertIn("protocol: json", output)
+        self.assertIn("retries: 2", output)
+        self.assertIn("retry_delay: 5s", output)
         self.assertNotIn("OpenCode:", output)
         self.assertNotIn("opencode:", output)
         self.assertNotIn("Install OpenCode", output)

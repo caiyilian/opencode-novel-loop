@@ -41,6 +41,13 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be 0 or greater")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dialoop",
@@ -146,6 +153,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timeout in seconds for model endpoint requests.",
     )
     parser.add_argument(
+        "--model-retries",
+        type=non_negative_int,
+        default=2,
+        help="Retry count for timed out model endpoint requests.",
+    )
+    parser.add_argument(
+        "--model-retry-delay",
+        type=non_negative_float,
+        default=5.0,
+        help="Delay in seconds before retrying a timed out model endpoint request.",
+    )
+    parser.add_argument(
         "--check-model",
         action="store_true",
         help="During --dry-run, send one small request to the configured model endpoint.",
@@ -183,6 +202,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         api_key=args.api_key,
         model=args.model,
         timeout=args.model_timeout,
+        retries=args.model_retries,
+        retry_delay=args.model_retry_delay,
     )
     annotations_path = _resolve_path_from_workdir(args.annotations_output, config.workdir)
 
@@ -372,6 +393,8 @@ def render_model_report(model_config: ModelConfig, protocol: str, check_model: b
         f"  model: {model_config.model}",
         f"  protocol: {protocol}",
         f"  timeout: {model_config.timeout:g}s",
+        f"  retries: {model_config.retries}",
+        f"  retry_delay: {model_config.retry_delay:g}s",
     ]
     if not check_model:
         lines.append("  connection: skipped (use --check-model to test)")
