@@ -5,8 +5,16 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
+from unittest.mock import patch
 
-from dialoop.model_client import ChatMessage, ModelConfig, ModelHTTPError, ModelResponseError, OpenAICompatibleClient
+from dialoop.model_client import (
+    ChatMessage,
+    ModelConfig,
+    ModelHTTPError,
+    ModelResponseError,
+    ModelTimeoutError,
+    OpenAICompatibleClient,
+)
 from dialoop.protocol import local_tool_specs
 
 
@@ -73,6 +81,20 @@ def chat_response(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class FakeURLResponse:
+    def __init__(self, payload: dict[str, Any]):
+        self.payload = payload
+
+    def __enter__(self) -> "FakeURLResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
 class ModelClientTest(unittest.TestCase):
     def test_default_timeout_is_long_enough_for_local_models(self) -> None:
         self.assertEqual(ModelConfig().timeout, 60.0)
@@ -136,6 +158,42 @@ class ModelClientTest(unittest.TestCase):
 
             with self.assertRaises(ModelResponseError):
                 client.chat([ChatMessage(role="user", content="hello")])
+
+    def test_chat_retries_timed_out_request(self) -> None:
+        response = FakeURLResponse(chat_response({"role": "assistant", "content": "OK"}))
+        with patch("dialoop.model_client.urllib.request.urlopen", side_effect=[TimeoutError(), response]) as urlopen:
+            client = OpenAICompatibleClient(
+                ModelConfig(
+                    base_url="http://127.0.0.1:9999/v1",
+                    model="test-model",
+                    timeout=0.01,
+                    retries=1,
+                    retry_delay=0,
+                )
+            )
+
+            result = client.chat([ChatMessage(role="user", content="hello")])
+
+        self.assertEqual(result.content, "OK")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_chat_raises_after_timeout_retries_are_exhausted(self) -> None:
+        with patch("dialoop.model_client.urllib.request.urlopen", side_effect=TimeoutError()) as urlopen:
+            client = OpenAICompatibleClient(
+                ModelConfig(
+                    base_url="http://127.0.0.1:9999/v1",
+                    model="test-model",
+                    timeout=0.01,
+                    retries=1,
+                    retry_delay=0,
+                )
+            )
+
+            with self.assertRaises(ModelTimeoutError) as raised:
+                client.chat([ChatMessage(role="user", content="hello")])
+
+        self.assertIn("after 2 attempt", str(raised.exception))
+        self.assertEqual(urlopen.call_count, 2)
 
 
 if __name__ == "__main__":

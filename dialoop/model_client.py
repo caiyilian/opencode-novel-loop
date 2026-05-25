@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -26,12 +27,18 @@ class ModelResponseError(ModelClientError):
     """Raised when the endpoint response shape is not usable."""
 
 
+class ModelTimeoutError(ModelClientError):
+    """Raised when the model endpoint times out after retry attempts."""
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     base_url: str = DEFAULT_BASE_URL
     api_key: str = DEFAULT_API_KEY
     model: str = DEFAULT_MODEL
     timeout: float = 60.0
+    retries: int = 2
+    retry_delay: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -147,27 +154,7 @@ class OpenAICompatibleClient:
         )
 
     def _post_json(self, url: str, body: dict[str, Any]) -> dict[str, Any]:
-        request = urllib.request.Request(
-            url=url,
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout) as response:
-                data = response.read().decode("utf-8")
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise ModelHTTPError(f"HTTP {error.code} from model endpoint: {detail}") from error
-        except urllib.error.URLError as error:
-            raise ModelClientError(f"model endpoint connection failed: {error.reason}") from error
-        except TimeoutError as error:
-            raise ModelClientError("model endpoint request timed out") from error
+        data = self._post_json_with_retries(url, body)
 
         try:
             payload = json.loads(data)
@@ -237,3 +224,50 @@ class OpenAICompatibleClient:
                 )
             )
         return calls
+
+    def _post_json_with_retries(self, url: str, body: dict[str, Any]) -> str:
+        attempts = max(0, self.config.retries) + 1
+        for attempt in range(1, attempts + 1):
+            request = urllib.request.Request(
+                url=url,
+                data=json.dumps(body).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {self.config.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
+
+            try:
+                with urllib.request.urlopen(request, timeout=self.config.timeout) as response:
+                    return response.read().decode("utf-8")
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", errors="replace")
+                raise ModelHTTPError(f"HTTP {error.code} from model endpoint: {detail}") from error
+            except urllib.error.URLError as error:
+                if _is_timeout_error(error.reason) and attempt < attempts:
+                    self._sleep_before_retry()
+                    continue
+                if _is_timeout_error(error.reason):
+                    raise ModelTimeoutError(
+                        f"model endpoint request timed out after {attempt} attempt(s)"
+                    ) from error
+                raise ModelClientError(f"model endpoint connection failed: {error.reason}") from error
+            except TimeoutError as error:
+                if attempt < attempts:
+                    self._sleep_before_retry()
+                    continue
+                raise ModelTimeoutError(f"model endpoint request timed out after {attempt} attempt(s)") from error
+
+        raise ModelTimeoutError(f"model endpoint request timed out after {attempts} attempt(s)")
+
+    def _sleep_before_retry(self) -> None:
+        if self.config.retry_delay > 0:
+            time.sleep(self.config.retry_delay)
+
+
+def _is_timeout_error(reason: Any) -> bool:
+    if isinstance(reason, TimeoutError):
+        return True
+    return "timed out" in str(reason).lower()
