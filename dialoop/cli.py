@@ -165,6 +165,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delay in seconds before retrying a timed out model endpoint request.",
     )
     parser.add_argument(
+        "--verifier-mode",
+        choices=["off", "risk", "all"],
+        default="risk",
+        help=(
+            "Verifier Agent mode: off disables it, risk verifies only high-risk annotations, "
+            "all verifies every submitted annotation."
+        ),
+    )
+    parser.add_argument(
+        "--verifier-max-tokens",
+        type=positive_int,
+        default=500,
+        help="Maximum tokens for one Verifier Agent response.",
+    )
+    parser.add_argument(
         "--check-model",
         action="store_true",
         help="During --dry-run, send one small request to the configured model endpoint.",
@@ -220,6 +235,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 search_limit=args.search_limit,
                 previous_context_dialogues=args.previous_context_dialogues,
                 following_context_dialogues=args.following_context_dialogues,
+                verifier_mode=args.verifier_mode,
+                verifier_max_tokens=args.verifier_max_tokens,
             )
         )
         print()
@@ -243,6 +260,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             protocol=args.protocol,
             max_tool_steps=args.max_tool_steps,
             context_window_lines=args.context_window_lines,
+            verifier_mode=args.verifier_mode,
+            verifier_max_tokens=args.verifier_max_tokens,
         ),
         prompt_output=sys.stdout if args.show_prompt else None,
         annotation_store=None if args.no_annotations else AnnotationStore(annotations_path),
@@ -298,6 +317,8 @@ def render_dry_run_report(
     search_limit: Optional[int] = None,
     previous_context_dialogues: Optional[int] = None,
     following_context_dialogues: Optional[int] = None,
+    verifier_mode: Optional[str] = None,
+    verifier_max_tokens: Optional[int] = None,
 ) -> str:
     lines = [
         title,
@@ -329,6 +350,10 @@ def render_dry_run_report(
         lines.append(f"  previous_context_dialogues: {previous_context_dialogues}")
     if following_context_dialogues is not None:
         lines.append(f"  following_context_dialogues: {following_context_dialogues}")
+    if verifier_mode is not None:
+        lines.append(f"  verifier_mode: {verifier_mode}")
+    if verifier_max_tokens is not None:
+        lines.append(f"  verifier_max_tokens: {verifier_max_tokens}")
     lines.extend(["", "Environment:"])
     lines.extend(f"  {line}" for line in _format_command_status(python_status))
     return "\n".join(lines)

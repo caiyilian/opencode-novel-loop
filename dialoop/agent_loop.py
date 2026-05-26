@@ -8,6 +8,8 @@ from .annotations import AnnotationStore, build_annotation_records
 from .local_tools import DialoopLocalTools, SpeakerCountMismatchError, ToolValidationError
 from .model_client import ChatMessage, ChatResult, ToolCall
 from .protocol import JsonAction, ProtocolError, local_tool_specs, parse_json_action
+from .risk import RiskAssessment, assess_annotation_risk
+from .verifier import VerifierAgent
 
 
 class AgentLoopError(RuntimeError):
@@ -33,14 +35,21 @@ class AgentLoopConfig:
     context_window_lines: int = 80
     temperature: float = 0.0
     require_context_before_submit: bool = True
+    verifier_mode: str = "off"
+    verifier_temperature: float = 0.0
+    verifier_max_tokens: int = 500
 
     def __post_init__(self) -> None:
         if self.protocol not in {"auto", "tools", "json"}:
             raise AgentLoopError(f"unsupported protocol: {self.protocol}")
+        if self.verifier_mode not in {"off", "risk", "all"}:
+            raise AgentLoopError(f"unsupported verifier_mode: {self.verifier_mode}")
         if self.max_tool_steps <= 0:
             raise AgentLoopError("max_tool_steps must be greater than 0")
         if self.context_window_lines <= 0:
             raise AgentLoopError("context_window_lines must be greater than 0")
+        if self.verifier_max_tokens <= 0:
+            raise AgentLoopError("verifier_max_tokens must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -162,12 +171,22 @@ class AgentRunner:
         config: Optional[AgentLoopConfig] = None,
         prompt_output: Optional[TextIO] = None,
         annotation_store: Optional[AnnotationStore] = None,
+        verifier_client: Optional[Any] = None,
     ):
         self.model_client = model_client
         self.tools = tools
         self.config = config or AgentLoopConfig()
         self.prompt_output = prompt_output
         self.annotation_store = annotation_store
+        self.verifier_agent = (
+            None
+            if self.config.verifier_mode == "off"
+            else VerifierAgent(
+                verifier_client or model_client,
+                temperature=self.config.verifier_temperature,
+                max_tokens=self.config.verifier_max_tokens,
+            )
+        )
         self._used_context_tool = False
 
     def run_one_batch(self) -> AgentBatchResult:
@@ -196,14 +215,20 @@ class AgentRunner:
             executions = self._handle_response(messages, response)
             history.extend(executions)
 
+            review_blocked_submit = False
             for execution in executions:
                 if execution.accepted_submit:
-                    progress = execution.result["progress"]
-                    annotations_written = self._write_annotations(
+                    finalized = self._finalize_accepted_submit(
                         dialogues=initial_batch["dialogues"],
                         accepted_submit=execution,
                         history=history,
+                        messages=messages,
                     )
+                    if finalized is None:
+                        review_blocked_submit = True
+                        break
+                    progress = finalized["progress"]
+                    annotations_written = finalized["annotations_written"]
                     return AgentBatchResult(
                         submitted=True,
                         done=progress["remaining"] == 0,
@@ -214,6 +239,9 @@ class AgentRunner:
                         tool_history=history,
                         annotations_written=annotations_written,
                     )
+            if review_blocked_submit:
+                self._maybe_warn_before_step_limit(messages, step)
+                continue
             self._maybe_warn_before_step_limit(messages, step)
 
         progress = self.tools.get_progress()
@@ -360,27 +388,79 @@ class AgentRunner:
 
         return ToolExecution(name=name, result=result, arguments=dict(args))
 
-    def _write_annotations(
+    def _finalize_accepted_submit(
         self,
         dialogues: list[dict[str, Any]],
         accepted_submit: ToolExecution,
         history: list[ToolExecution],
-    ) -> int:
-        if self.annotation_store is None:
-            return 0
-
+        messages: list[ChatMessage],
+    ) -> Optional[dict[str, Any]]:
         speakers = accepted_submit.result.get("speakers", [])
         if not isinstance(speakers, list) or any(not isinstance(item, str) for item in speakers):
-            return 0
+            return self._commit_without_annotations(accepted_submit)
 
-        records = build_annotation_records(
-            dialogues=dialogues,
-            speakers=speakers,
-            submit_args=accepted_submit.arguments,
-            tool_summary=summarize_tool_history(history),
-            recovery=submit_recovery_info(accepted_submit.result),
-        )
-        return self.annotation_store.append(records)
+        records = []
+        if self.annotation_store is not None or self.verifier_agent is not None:
+            records = build_annotation_records(
+                dialogues=dialogues,
+                speakers=speakers,
+                submit_args=accepted_submit.arguments,
+                tool_summary=summarize_tool_history(history),
+                recovery=submit_recovery_info(accepted_submit.result),
+            )
+            records = self._review_annotation_records(records)
+            blocking_review = first_blocking_verifier_review(records)
+            if blocking_review is not None:
+                self._mark_submit_blocked_by_verifier(accepted_submit, blocking_review)
+                messages.append(ChatMessage(role="user", content=verifier_retry_message(blocking_review)))
+                return None
+
+        commit_result = self.tools.commit_labels(speakers)
+        accepted_submit.result.update(commit_result)
+        accepted_submit.result["pending_review"] = False
+        annotations_written = 0
+        if self.annotation_store is not None and records:
+            annotations_written = self.annotation_store.append(records)
+        return {
+            "progress": commit_result["progress"],
+            "annotations_written": annotations_written,
+        }
+
+    def _commit_without_annotations(self, accepted_submit: ToolExecution) -> dict[str, Any]:
+        speakers = accepted_submit.result.get("speakers", [])
+        commit_result = self.tools.commit_labels(speakers)
+        accepted_submit.result.update(commit_result)
+        accepted_submit.result["pending_review"] = False
+        return {
+            "progress": commit_result["progress"],
+            "annotations_written": 0,
+        }
+
+    def _review_annotation_records(self, records: list[Any]) -> list[Any]:
+        reviewed = []
+        for record in records:
+            risk = assess_annotation_risk(record)
+            verifier = self._maybe_verify_record(record, risk)
+            reviewed.append(record.with_review(risk=risk.to_dict(), verifier=verifier))
+        return reviewed
+
+    def _maybe_verify_record(self, record: Any, risk: RiskAssessment) -> Optional[dict[str, Any]]:
+        if self.verifier_agent is None:
+            return None
+        if self.config.verifier_mode == "risk" and not risk.needs_verifier:
+            return None
+        review = self.verifier_agent.verify(record, risk)
+        return review.to_dict()
+
+    def _mark_submit_blocked_by_verifier(
+        self,
+        accepted_submit: ToolExecution,
+        review: dict[str, Any],
+    ) -> None:
+        accepted_submit.result["accepted"] = False
+        accepted_submit.result["pending_review"] = False
+        accepted_submit.result["error"] = "verifier rejected the submitted speaker before label write"
+        accepted_submit.result["verifier"] = review
 
     def _execute_submit_labels(self, args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -394,7 +474,9 @@ class AgentRunner:
 
         if self.config.require_context_before_submit and not self._used_context_tool:
             return self._reject_premature_submit_with_context()
-        return self.tools.submit_labels(speakers=speakers)
+        result = self.tools.validate_labels(speakers=speakers)
+        result["pending_review"] = True
+        return result
 
     def _reject_premature_submit_with_context(self) -> dict[str, Any]:
         context = self.tools.read_active_context(self.config.context_window_lines)
@@ -479,6 +561,36 @@ def submit_recovery_info(result: dict[str, Any]) -> Optional[dict[str, Any]]:
         if key in result
     }
     return recovery or None
+
+
+def first_blocking_verifier_review(records: list[Any]) -> Optional[dict[str, Any]]:
+    for record in records:
+        verifier = record.verifier
+        if not isinstance(verifier, dict):
+            continue
+        if verifier.get("enabled") is True and verifier.get("verdict") == "fail":
+            return {
+                **verifier,
+                "index": record.index,
+                "line_number": record.line_number,
+                "speaker": record.speaker,
+            }
+    return None
+
+
+def verifier_retry_message(review: dict[str, Any]) -> str:
+    risk_codes = review.get("risk_signal_codes")
+    if not isinstance(risk_codes, list):
+        risk_codes = []
+    reason = review.get("reason") if isinstance(review.get("reason"), str) else "no reason"
+    return (
+        "Verifier rejected the submitted label before writing it to the output file. "
+        f"Dialogue index={review.get('index')} line={review.get('line_number')} "
+        f"speaker={review.get('speaker')} was not accepted. "
+        f"Verifier reason: {reason}. "
+        f"Risk signals: {', '.join(str(code) for code in risk_codes) or 'none'}. "
+        "Read or search more context if needed, then call submit_labels again with a corrected speaker."
+    )
 
 
 def format_batch_summary(dialogues: list[dict[str, Any]]) -> str:

@@ -12,6 +12,9 @@ from dialoop.cli import main
 from dialoop.model_client import ChatResult, ToolCall
 
 
+VERIFIER_PASS = ChatResult(content='{"verdict":"pass","reason":"ok","counter_evidence_lines":[]}')
+
+
 class FakeOpenAICompatibleClient:
     def __init__(self, _config):
         self.config = _config
@@ -36,6 +39,7 @@ class FakeOpenAICompatibleClient:
                     )
                 ],
             ),
+            VERIFIER_PASS,
         ]
 
     def chat(self, **_kwargs):
@@ -55,6 +59,7 @@ class FakeTwoBatchClient:
                 content="",
                 tool_calls=[ToolCall(id="submit-1", name="submit_labels", arguments={"speakers": ["Lawrence"]})],
             ),
+            VERIFIER_PASS,
             ChatResult(
                 content="",
                 tool_calls=[ToolCall(id="read-2", name="read_novel", arguments={"start_line": 2, "end_line": 2})],
@@ -63,6 +68,7 @@ class FakeTwoBatchClient:
                 content="",
                 tool_calls=[ToolCall(id="submit-2", name="submit_labels", arguments={"speakers": ["Holo"]})],
             ),
+            VERIFIER_PASS,
         ]
 
     def chat(self, **_kwargs):
@@ -82,6 +88,7 @@ class FakeInterruptedClient:
                 content="",
                 tool_calls=[ToolCall(id="submit-1", name="submit_labels", arguments={"speakers": ["Lawrence"]})],
             ),
+            VERIFIER_PASS,
         ]
 
     def chat(self, **_kwargs):
@@ -117,6 +124,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("context_window_lines: 80", output)
         self.assertIn("previous_context_dialogues: 8", output)
         self.assertIn("following_context_dialogues: 8", output)
+        self.assertIn("verifier_mode: risk", output)
+        self.assertIn("verifier_max_tokens: 500", output)
         self.assertIn("Model backend:", output)
         self.assertIn("protocol: json", output)
         self.assertIn("retries: 2", output)
