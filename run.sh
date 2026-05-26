@@ -8,4 +8,6 @@ python -m dialoop.cli novel.txt \
   --base-url http://172.31.102.189:11434/v1 \
   --api-key ollama \
   --model qwen3:32b \
-  --model-timeout 360
+  --model-timeout 360 \
+  --model-retries 3 \
+  --model-retry-delay 10
