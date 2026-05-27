@@ -8,7 +8,7 @@ from .annotations import AnnotationRecord, DEFAULT_REASON
 
 RISK_LEVELS = ("low", "medium", "high")
 PUNCTUATION_CHARS = set(" \t\r\n.,!?;:'\"()[]{}<>，。！？；：、“”‘’（）【】《》…—-~")
-SECOND_PERSON_MARKERS = ("你", "您")
+SECOND_PERSON_MARKERS = ("你", "您", "汝")
 
 
 @dataclass(frozen=True)
@@ -125,6 +125,15 @@ def assess_annotation_risk(record: AnnotationRecord) -> RiskAssessment:
             )
         )
 
+    if _looks_like_repeated_call(stripped_text):
+        signals.append(
+            RiskSignal(
+                code="repeated_call",
+                message="Dialogue repeats the same shouted phrase and may be addressing someone else.",
+                level="high",
+            )
+        )
+
     if ("?" in stripped_text or "？" in stripped_text) and semantic_length <= 8:
         signals.append(
             RiskSignal(
@@ -165,3 +174,14 @@ def _looks_like_silence_or_fragment(text: str) -> bool:
     if semantic_length == 0:
         return True
     return "..." in text or "……" in text or "..." in text.replace("…", ".")
+
+
+def _looks_like_repeated_call(text: str) -> bool:
+    separators = "！!？?。。，,、"
+    normalized = text
+    for separator in separators:
+        normalized = normalized.replace(separator, "|")
+    parts = [part.strip() for part in normalized.split("|") if part.strip()]
+    if len(parts) < 2:
+        return False
+    return len(set(parts)) == 1 and _semantic_length(parts[0]) > 0

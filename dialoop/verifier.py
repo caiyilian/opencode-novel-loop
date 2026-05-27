@@ -50,46 +50,65 @@ class VerifierAgent:
         self,
         model_client: Any,
         temperature: float = 0.0,
-        max_tokens: int = 500,
+        max_tokens: int = 1200,
+        retries: int = 1,
     ):
         self.model_client = model_client
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.retries = max(0, retries)
 
     def verify(self, record: AnnotationRecord, risk: RiskAssessment) -> VerifierReview:
         messages = verifier_messages(record, risk)
-        try:
-            response = self.model_client.chat(
-                messages=messages,
-                tools=None,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-        except Exception as error:  # noqa: BLE001 - verifier errors must not break unattended runs.
-            return VerifierReview(
-                enabled=True,
-                verdict="error",
-                reason="Verifier model call failed.",
-                counter_evidence_lines=[],
-                risk_signal_codes=_risk_signal_codes(risk),
-                error=str(error),
-            )
+        last_raw: Optional[str] = None
+        last_error: Optional[str] = None
 
-        raw = response.content
-        try:
-            payload = json.loads(_extract_json_object(raw))
-        except (json.JSONDecodeError, ValueError) as error:
-            return VerifierReview(
-                enabled=True,
-                verdict="error",
-                reason="Verifier returned invalid JSON.",
-                counter_evidence_lines=[],
-                risk_signal_codes=_risk_signal_codes(risk),
-                raw=raw,
-                error=str(error),
-            )
+        for attempt in range(self.retries + 1):
+            try:
+                response = self.model_client.chat(
+                    messages=messages,
+                    tools=None,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+            except Exception as error:  # noqa: BLE001 - verifier errors must not break unattended runs.
+                last_error = str(error)
+                if attempt < self.retries:
+                    continue
+                return _error_review(
+                    risk=risk,
+                    reason="Verifier model call failed.",
+                    raw=last_raw,
+                    error=last_error,
+                )
 
-        return review_from_payload(payload, risk, raw=raw)
+            last_raw = response.content
+            try:
+                payload = json.loads(_extract_json_object(last_raw))
+            except (json.JSONDecodeError, ValueError) as error:
+                last_error = str(error)
+                if attempt < self.retries:
+                    messages = verifier_retry_messages(last_raw, last_error)
+                    continue
+                return _error_review(
+                    risk=risk,
+                    reason="Verifier returned invalid JSON.",
+                    raw=last_raw,
+                    error=last_error,
+                )
+
+            review = review_from_payload(payload, risk, raw=last_raw)
+            if review.verdict != "error" or attempt >= self.retries:
+                return review
+            last_error = review.error or "verifier JSON did not include a valid verdict"
+            messages = verifier_retry_messages(last_raw, last_error)
+
+        return _error_review(
+            risk=risk,
+            reason="Verifier returned invalid JSON.",
+            raw=last_raw,
+            error=last_error,
+        )
 
 
 def verifier_messages(record: AnnotationRecord, risk: RiskAssessment) -> list[ChatMessage]:
@@ -100,6 +119,7 @@ def verifier_messages(record: AnnotationRecord, risk: RiskAssessment) -> list[Ch
             "Look only for counter-evidence, turn-order conflicts, addressee/speaker confusion, or insufficient evidence.",
             "Return verdict=fail only when the submitted speaker is not supported.",
             "Return verdict=uncertain when evidence is weak but no clear counter-evidence is found.",
+            "Keep reason short: at most 80 Chinese characters or one short English sentence.",
         ],
         "annotation": {
             "index": record.index,
@@ -123,10 +143,33 @@ def verifier_messages(record: AnnotationRecord, risk: RiskAssessment) -> list[Ch
             role="system",
             content=(
                 "You are the Dialoop Verifier Agent. Your only job is to check whether "
-                "the Labeler evidence supports the submitted speaker. Return exactly one JSON object."
+                "the Labeler evidence supports the submitted speaker. Return exactly one compact JSON object. "
+                "Do not use Markdown fences."
             ),
         ),
         ChatMessage(role="user", content=json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+    ]
+
+
+def verifier_retry_messages(raw: Optional[str], error: str) -> list[ChatMessage]:
+    previous = raw if raw is not None and raw.strip() else "<empty response>"
+    return [
+        ChatMessage(
+            role="system",
+            content=(
+                "You are the Dialoop Verifier Agent. Repair your previous verifier response. "
+                "Return exactly one compact JSON object and nothing else."
+            ),
+        ),
+        ChatMessage(
+            role="user",
+            content=(
+                "The previous verifier response was not usable JSON.\n"
+                f"Error: {error}\n"
+                f"Previous response: {previous[:600]}\n"
+                'Return only this shape: {"verdict":"pass|fail|uncertain","reason":"short","counter_evidence_lines":[]}'
+            ),
+        ),
     ]
 
 
@@ -179,6 +222,23 @@ def _line_numbers(value: Any) -> list[int]:
 
 def _risk_signal_codes(risk: RiskAssessment) -> list[str]:
     return [signal.code for signal in risk.signals]
+
+
+def _error_review(
+    risk: RiskAssessment,
+    reason: str,
+    raw: Optional[str] = None,
+    error: Optional[str] = None,
+) -> VerifierReview:
+    return VerifierReview(
+        enabled=True,
+        verdict="error",
+        reason=reason,
+        counter_evidence_lines=[],
+        risk_signal_codes=_risk_signal_codes(risk),
+        raw=raw,
+        error=error,
+    )
 
 
 def _extract_json_object(text: str) -> str:

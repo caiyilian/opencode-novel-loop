@@ -176,8 +176,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--verifier-max-tokens",
         type=positive_int,
-        default=500,
+        default=1200,
         help="Maximum tokens for one Verifier Agent response.",
+    )
+    parser.add_argument(
+        "--verifier-retries",
+        type=non_negative_int,
+        default=1,
+        help="Retry count for invalid or failed Verifier Agent responses.",
     )
     parser.add_argument(
         "--check-model",
@@ -237,6 +243,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 following_context_dialogues=args.following_context_dialogues,
                 verifier_mode=args.verifier_mode,
                 verifier_max_tokens=args.verifier_max_tokens,
+                verifier_retries=args.verifier_retries,
             )
         )
         print()
@@ -262,6 +269,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             context_window_lines=args.context_window_lines,
             verifier_mode=args.verifier_mode,
             verifier_max_tokens=args.verifier_max_tokens,
+            verifier_retries=args.verifier_retries,
         ),
         prompt_output=sys.stdout if args.show_prompt else None,
         annotation_store=None if args.no_annotations else AnnotationStore(annotations_path),
@@ -319,6 +327,7 @@ def render_dry_run_report(
     following_context_dialogues: Optional[int] = None,
     verifier_mode: Optional[str] = None,
     verifier_max_tokens: Optional[int] = None,
+    verifier_retries: Optional[int] = None,
 ) -> str:
     lines = [
         title,
@@ -354,6 +363,8 @@ def render_dry_run_report(
         lines.append(f"  verifier_mode: {verifier_mode}")
     if verifier_max_tokens is not None:
         lines.append(f"  verifier_max_tokens: {verifier_max_tokens}")
+    if verifier_retries is not None:
+        lines.append(f"  verifier_retries: {verifier_retries}")
     lines.extend(["", "Environment:"])
     lines.extend(f"  {line}" for line in _format_command_status(python_status))
     return "\n".join(lines)
