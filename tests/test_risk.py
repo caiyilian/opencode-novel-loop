@@ -48,6 +48,18 @@ class RiskAssessmentTest(unittest.TestCase):
         self.assertIn("second_person_address", [signal.code for signal in assessment.signals])
         self.assertIn("short_question", [signal.code for signal in assessment.signals])
 
+    def test_archaic_second_person_marker_is_high_risk(self) -> None:
+        assessment = assess_annotation_risk(record(text="汝曾去过吗？", confidence="high"))
+
+        self.assertEqual(assessment.level, "high")
+        self.assertIn("second_person_address", [signal.code for signal in assessment.signals])
+
+    def test_repeated_call_is_high_risk(self) -> None:
+        assessment = assess_annotation_risk(record(text="甲！甲！甲！", confidence="high"))
+
+        self.assertEqual(assessment.level, "high")
+        self.assertIn("repeated_call", [signal.code for signal in assessment.signals])
+
     def test_specific_well_evidenced_dialogue_is_low_risk(self) -> None:
         assessment = assess_annotation_risk(
             record(text="This sentence is directly attributed by the surrounding narration.")

@@ -9,13 +9,15 @@ from dialoop.verifier import VerifierAgent, review_from_payload, verifier_messag
 
 
 class FakeVerifierClient:
-    def __init__(self, response: ChatResult):
-        self.response = response
+    def __init__(self, responses: ChatResult | list[ChatResult]):
+        self.responses = responses if isinstance(responses, list) else [responses]
         self.calls = []
 
     def chat(self, **kwargs):
         self.calls.append(kwargs)
-        return self.response
+        if not self.responses:
+            raise AssertionError("verifier was called more times than expected")
+        return self.responses.pop(0)
 
 
 def sample_record() -> AnnotationRecord:
@@ -68,8 +70,25 @@ class VerifierTest(unittest.TestCase):
 
         self.assertEqual(review.verdict, "error")
         self.assertFalse(review.blocks_submission)
-        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(client.calls), 2)
         self.assertIsNone(client.calls[0]["tools"])
+        self.assertIn("not usable JSON", client.calls[1]["messages"][1].content)
+
+    def test_agent_retries_invalid_json_with_compact_repair_prompt(self) -> None:
+        record = sample_record()
+        risk = assess_annotation_risk(record)
+        client = FakeVerifierClient(
+            [
+                ChatResult(content='```json\n{"verdict":"pass", "reason": "cut off"'),
+                ChatResult(content='{"verdict":"pass","reason":"Retry fixed it.","counter_evidence_lines":[]}'),
+            ]
+        )
+
+        review = VerifierAgent(client).verify(record, risk)
+
+        self.assertEqual(review.verdict, "pass")
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[0]["max_tokens"], 1200)
 
 
 if __name__ == "__main__":

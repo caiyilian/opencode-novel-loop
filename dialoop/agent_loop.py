@@ -37,7 +37,8 @@ class AgentLoopConfig:
     require_context_before_submit: bool = True
     verifier_mode: str = "off"
     verifier_temperature: float = 0.0
-    verifier_max_tokens: int = 500
+    verifier_max_tokens: int = 1200
+    verifier_retries: int = 1
 
     def __post_init__(self) -> None:
         if self.protocol not in {"auto", "tools", "json"}:
@@ -50,6 +51,8 @@ class AgentLoopConfig:
             raise AgentLoopError("context_window_lines must be greater than 0")
         if self.verifier_max_tokens <= 0:
             raise AgentLoopError("verifier_max_tokens must be greater than 0")
+        if self.verifier_retries < 0:
+            raise AgentLoopError("verifier_retries must be 0 or greater")
 
 
 @dataclass(frozen=True)
@@ -185,6 +188,7 @@ class AgentRunner:
                 verifier_client or model_client,
                 temperature=self.config.verifier_temperature,
                 max_tokens=self.config.verifier_max_tokens,
+                retries=self.config.verifier_retries,
             )
         )
         self._used_context_tool = False
