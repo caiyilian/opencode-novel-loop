@@ -10,10 +10,12 @@ from .quality import (
     QualityError,
     evaluate_labels,
     load_terms,
+    render_annotation_summary,
     render_error_labels,
     render_evaluation_report,
     render_term_scan_report,
     scan_terms,
+    summarize_annotations,
 )
 
 
@@ -21,6 +23,13 @@ def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be 0 or greater")
     return parsed
 
 
@@ -72,6 +81,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--terms-file", type=Path, help="UTF-8 file with one scan term per line.")
 
+    annotations = subparsers.add_parser(
+        "annotations-summary",
+        help="Summarize risk and verifier metadata from annotations.jsonl.",
+    )
+    annotations.add_argument(
+        "--annotations",
+        type=Path,
+        required=True,
+        help="Path to .dialoop/annotations.jsonl.",
+    )
+    annotations.add_argument(
+        "--show-problems",
+        type=non_negative_int,
+        default=0,
+        help="Print the first N verifier or structural problems.",
+    )
+
     return parser
 
 
@@ -83,6 +109,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_evaluate(args)
         if args.command == "scan-terms":
             return run_scan_terms(args)
+        if args.command == "annotations-summary":
+            return run_annotations_summary(args)
     except QualityError as error:
         parser.exit(2, f"dialoop-quality: error: {error}\n")
     raise AssertionError(f"unhandled command: {args.command}")
@@ -106,12 +134,22 @@ def run_scan_terms(args: argparse.Namespace) -> int:
     return 1 if matches else 0
 
 
+def run_annotations_summary(args: argparse.Namespace) -> int:
+    summary = summarize_annotations(args.annotations)
+    print(render_annotation_summary(summary, show_problems=args.show_problems))
+    return 1 if summary.has_structural_errors else 0
+
+
 def evaluate_main(argv: Optional[Sequence[str]] = None) -> int:
     return main(["evaluate", *(argv if argv is not None else sys.argv[1:])])
 
 
 def scan_terms_main(argv: Optional[Sequence[str]] = None) -> int:
     return main(["scan-terms", *(argv if argv is not None else sys.argv[1:])])
+
+
+def annotations_summary_main(argv: Optional[Sequence[str]] = None) -> int:
+    return main(["annotations-summary", *(argv if argv is not None else sys.argv[1:])])
 
 
 if __name__ == "__main__":
