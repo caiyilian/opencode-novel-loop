@@ -349,6 +349,11 @@ class DialoopLocalTools:
         return self.dialogue_index.search(keyword=keyword, limit=limit or self.search_limit)
 
     def submit_labels(self, speakers: list[str]) -> dict[str, Any]:
+        result = self.validate_labels(speakers)
+        result.update(self.commit_labels(result["speakers"]))
+        return result
+
+    def validate_labels(self, speakers: list[str]) -> dict[str, Any]:
         if not self._active_batch:
             raise ToolValidationError("no active batch; call get_next_dialogue first")
         expected_count = len(self._active_batch)
@@ -373,13 +378,14 @@ class DialoopLocalTools:
             )
 
         cleaned_speakers = [speaker.strip() for speaker in speakers]
-        written = self.label_store.append(speakers)
-        self._active_batch = []
+        if not cleaned_speakers:
+            raise ToolValidationError("speakers must not be empty")
+        if any(not speaker for speaker in cleaned_speakers):
+            raise ToolValidationError("speaker names must not be empty")
+
         result = {
             "accepted": True,
-            "written": written,
             "speakers": cleaned_speakers,
-            "progress": self.get_progress(),
         }
         if warning is not None:
             result.update(
@@ -391,3 +397,17 @@ class DialoopLocalTools:
                 }
             )
         return result
+
+    def commit_labels(self, speakers: list[str]) -> dict[str, Any]:
+        if not self._active_batch:
+            raise ToolValidationError("no active batch; call get_next_dialogue first")
+        if len(speakers) != len(self._active_batch):
+            raise ToolValidationError(
+                f"speaker count mismatch at commit: expected {len(self._active_batch)}, got {len(speakers)}"
+            )
+        written = self.label_store.append(speakers)
+        self._active_batch = []
+        return {
+            "written": written,
+            "progress": self.get_progress(),
+        }

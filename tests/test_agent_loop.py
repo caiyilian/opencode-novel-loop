@@ -138,7 +138,123 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(annotation["reason"], "The narration says Lawrence said it.")
             self.assertEqual(annotation["rejected_candidates"], ["Holo"])
             self.assertEqual(annotation["confidence"], "high")
+            self.assertEqual(annotation["risk"]["level"], "low")
+            self.assertIsNone(annotation["verifier"])
             self.assertEqual(annotation["tool_summary"]["read_novel"][0]["requested_start_line"], 1)
+
+    def test_risk_mode_verifier_records_review_for_high_risk_annotation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-submit",
+                                name="submit_labels",
+                                arguments={
+                                    "speakers": ["Lawrence"],
+                                    "evidence_lines": [1],
+                                    "reason": "Short line requires turn context.",
+                                    "confidence": "low",
+                                },
+                            )
+                        ],
+                    ),
+                    ChatResult(content='{"verdict":"pass","reason":"Evidence is enough.","counter_evidence_lines":[]}'),
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=3, verifier_mode="risk"),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            annotation = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+            self.assertEqual(len(client.calls), 3)
+            self.assertEqual(annotation["risk"]["level"], "high")
+            self.assertEqual(annotation["verifier"]["verdict"], "pass")
+            self.assertIn("low_confidence", annotation["verifier"]["risk_signal_codes"])
+
+    def test_verifier_failure_blocks_write_and_requests_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="bad-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Holo"], "confidence": "low"},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content=(
+                            '{"verdict":"fail","reason":"The evidence does not support Holo.",'
+                            '"counter_evidence_lines":[1]}'
+                        )
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="good-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"], "confidence": "low"},
+                            )
+                        ],
+                    ),
+                    ChatResult(content='{"verdict":"pass","reason":"Retry is supported.","counter_evidence_lines":[]}'),
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=4, verifier_mode="risk"),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            annotation = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(result.tool_steps, 3)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+            self.assertEqual(result.tool_history[1].result["accepted"], False)
+            self.assertIn("verifier rejected", result.tool_history[1].result["error"])
+            self.assertEqual(annotation["speaker"], "Lawrence")
+            self.assertEqual(annotation["verifier"]["verdict"], "pass")
 
     def test_agent_writes_multi_dialogue_annotations_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

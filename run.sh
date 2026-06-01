@@ -10,4 +10,5 @@ python -m dialoop.cli novel.txt \
   --model qwen3:32b \
   --model-timeout 360 \
   --model-retries 3 \
-  --model-retry-delay 10
+  --model-retry-delay 10 \
+  --reset-annotations

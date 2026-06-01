@@ -12,6 +12,9 @@ from dialoop.cli import main
 from dialoop.model_client import ChatResult, ToolCall
 
 
+VERIFIER_PASS = ChatResult(content='{"verdict":"pass","reason":"ok","counter_evidence_lines":[]}')
+
+
 class FakeOpenAICompatibleClient:
     def __init__(self, _config):
         self.config = _config
@@ -36,6 +39,7 @@ class FakeOpenAICompatibleClient:
                     )
                 ],
             ),
+            VERIFIER_PASS,
         ]
 
     def chat(self, **_kwargs):
@@ -55,6 +59,7 @@ class FakeTwoBatchClient:
                 content="",
                 tool_calls=[ToolCall(id="submit-1", name="submit_labels", arguments={"speakers": ["Lawrence"]})],
             ),
+            VERIFIER_PASS,
             ChatResult(
                 content="",
                 tool_calls=[ToolCall(id="read-2", name="read_novel", arguments={"start_line": 2, "end_line": 2})],
@@ -63,6 +68,7 @@ class FakeTwoBatchClient:
                 content="",
                 tool_calls=[ToolCall(id="submit-2", name="submit_labels", arguments={"speakers": ["Holo"]})],
             ),
+            VERIFIER_PASS,
         ]
 
     def chat(self, **_kwargs):
@@ -82,6 +88,7 @@ class FakeInterruptedClient:
                 content="",
                 tool_calls=[ToolCall(id="submit-1", name="submit_labels", arguments={"speakers": ["Lawrence"]})],
             ),
+            VERIFIER_PASS,
         ]
 
     def chat(self, **_kwargs):
@@ -117,6 +124,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("context_window_lines: 80", output)
         self.assertIn("previous_context_dialogues: 8", output)
         self.assertIn("following_context_dialogues: 8", output)
+        self.assertIn("verifier_mode: risk", output)
+        self.assertIn("verifier_max_tokens: 1200", output)
+        self.assertIn("verifier_retries: 1", output)
         self.assertIn("Model backend:", output)
         self.assertIn("protocol: json", output)
         self.assertIn("retries: 2", output)
@@ -170,6 +180,59 @@ class CliTest(unittest.TestCase):
         self.assertEqual(annotation["speaker"], "Lawrence")
         self.assertEqual(annotation["line_number"], 1)
         self.assertEqual(annotation["evidence_lines"], [1])
+        self.assertIn("annotations_written: 1", stdout.getvalue())
+
+    def test_run_rejects_stale_annotations_ahead_of_label_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            novel_path = Path(temp_dir) / "novel.txt"
+            output_path = Path(temp_dir) / "labels.txt"
+            annotations_path = Path(temp_dir) / "annotations.jsonl"
+            novel_path.write_text("Lawrence said: \u300cHello.\u300d\n", encoding="utf-8")
+            annotations_path.write_text("{}\n", encoding="utf-8")
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    main(
+                        [
+                            str(novel_path),
+                            "--output",
+                            str(output_path),
+                            "--annotations-output",
+                            str(annotations_path),
+                        ]
+                    )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("annotations output already has 1 record", stderr.getvalue())
+        self.assertIn("--reset-annotations", stderr.getvalue())
+
+    def test_reset_annotations_truncates_stale_file_before_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            novel_path = Path(temp_dir) / "novel.txt"
+            output_path = Path(temp_dir) / "labels.txt"
+            annotations_path = Path(temp_dir) / "annotations.jsonl"
+            novel_path.write_text("Lawrence said: \u300cHello.\u300d\n", encoding="utf-8")
+            annotations_path.write_text("{}\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with patch("dialoop.cli.OpenAICompatibleClient", FakeOpenAICompatibleClient):
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            str(novel_path),
+                            "--output",
+                            str(output_path),
+                            "--annotations-output",
+                            str(annotations_path),
+                            "--reset-annotations",
+                        ]
+                    )
+            rows = [json.loads(line) for line in annotations_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["speaker"], "Lawrence")
         self.assertIn("annotations_written: 1", stdout.getvalue())
 
     def test_show_prompt_prints_prompt_to_stdout(self) -> None:

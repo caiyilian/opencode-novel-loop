@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -11,8 +12,10 @@ from dialoop.quality import (
     evaluate_labels,
     extract_expected_dialogues,
     load_terms,
+    render_annotation_summary,
     render_error_labels,
     scan_terms,
+    summarize_annotations,
 )
 from dialoop.quality_cli import main
 
@@ -168,6 +171,106 @@ class QualityTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("matches: 0", stdout.getvalue())
+
+    def test_summarize_annotations_counts_risk_verifier_and_structural_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            annotations_path = Path(directory) / "annotations.jsonl"
+            rows = [
+                annotation_row(index=0, risk_level="high", needs_verifier=True, verifier_verdict="pass"),
+                annotation_row(index=1, risk_level="low", needs_verifier=False, verifier_verdict=None),
+                annotation_row(index=2, risk_level="high", needs_verifier=True, verifier_verdict="error"),
+            ]
+            broken = dict(rows[0])
+            broken.pop("risk")
+            annotations_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(rows[0], ensure_ascii=False),
+                        json.dumps(rows[1], ensure_ascii=False),
+                        json.dumps(rows[2], ensure_ascii=False),
+                        json.dumps(broken, ensure_ascii=False),
+                        "{bad json",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            summary = summarize_annotations(annotations_path)
+            rendered = render_annotation_summary(summary, show_problems=3)
+
+        self.assertEqual(summary.total_lines, 5)
+        self.assertEqual(summary.valid_records, 4)
+        self.assertEqual(len(summary.json_errors), 1)
+        self.assertEqual(len(summary.missing_fields), 1)
+        self.assertEqual(summary.risk_level_counts["high"], 2)
+        self.assertEqual(summary.risk_level_counts["none"], 1)
+        self.assertEqual(summary.verifier_verdict_counts["error"], 1)
+        self.assertTrue(summary.has_structural_errors)
+        self.assertIn("verifier.verdict: error=1, pass=2, none=1", rendered)
+        self.assertIn("kind=verifier_error", rendered)
+
+    def test_quality_cli_annotations_summary_reports_problems(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            annotations_path = Path(directory) / "annotations.jsonl"
+            annotations_path.write_text(
+                json.dumps(
+                    annotation_row(index=0, risk_level="high", needs_verifier=True, verifier_verdict="uncertain"),
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "annotations-summary",
+                        "--annotations",
+                        str(annotations_path),
+                        "--show-problems",
+                        "1",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Dialoop annotations summary", stdout.getvalue())
+        self.assertIn("verifier.verdict: uncertain=1", stdout.getvalue())
+        self.assertIn("kind=verifier_uncertain", stdout.getvalue())
+
+def annotation_row(
+    *,
+    index: int,
+    risk_level: str,
+    needs_verifier: bool,
+    verifier_verdict: str | None,
+) -> dict:
+    verifier = None
+    if verifier_verdict is not None:
+        verifier = {
+            "enabled": True,
+            "verdict": verifier_verdict,
+            "reason": f"{verifier_verdict} reason",
+            "counter_evidence_lines": [],
+            "risk_signal_codes": ["sample_signal"],
+        }
+    return {
+        "index": index,
+        "line_number": index + 10,
+        "text": f"dialogue {index}",
+        "speaker": "甲",
+        "evidence_lines": [index + 10],
+        "reason": "sample reason",
+        "rejected_candidates": [],
+        "confidence": "high",
+        "tool_summary": {},
+        "recovery": None,
+        "risk": {
+            "level": risk_level,
+            "needs_verifier": needs_verifier,
+            "signals": [],
+        },
+        "verifier": verifier,
+    }
 
 
 if __name__ == "__main__":
