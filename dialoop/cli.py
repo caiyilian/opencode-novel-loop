@@ -72,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable annotations.jsonl writing for this run.",
     )
     parser.add_argument(
+        "--reset-annotations",
+        action="store_true",
+        help="Truncate the annotations output before starting a labeling run.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=positive_int,
         default=1,
@@ -165,6 +170,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delay in seconds before retrying a timed out model endpoint request.",
     )
     parser.add_argument(
+        "--verifier-mode",
+        choices=["off", "risk", "all"],
+        default="risk",
+        help=(
+            "Verifier Agent mode: off disables it, risk verifies only high-risk annotations, "
+            "all verifies every submitted annotation."
+        ),
+    )
+    parser.add_argument(
+        "--verifier-max-tokens",
+        type=positive_int,
+        default=1200,
+        help="Maximum tokens for one Verifier Agent response.",
+    )
+    parser.add_argument(
+        "--verifier-retries",
+        type=non_negative_int,
+        default=1,
+        help="Retry count for invalid or failed Verifier Agent responses.",
+    )
+    parser.add_argument(
         "--check-model",
         action="store_true",
         help="During --dry-run, send one small request to the configured model endpoint.",
@@ -220,6 +246,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 search_limit=args.search_limit,
                 previous_context_dialogues=args.previous_context_dialogues,
                 following_context_dialogues=args.following_context_dialogues,
+                verifier_mode=args.verifier_mode,
+                verifier_max_tokens=args.verifier_max_tokens,
+                verifier_retries=args.verifier_retries,
             )
         )
         print()
@@ -236,6 +265,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         previous_context_dialogues=args.previous_context_dialogues,
         following_context_dialogues=args.following_context_dialogues,
     )
+    if not args.no_annotations:
+        try:
+            prepare_annotations_for_run(
+                annotations_path=annotations_path,
+                labeled_count=tools.get_progress()["labeled"],
+                reset_annotations=args.reset_annotations,
+            )
+        except ConfigError as error:
+            parser.exit(2, f"dialoop: error: {error}\n")
+
     agent = AgentRunner(
         model_client=OpenAICompatibleClient(model_config),
         tools=tools,
@@ -243,6 +282,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             protocol=args.protocol,
             max_tool_steps=args.max_tool_steps,
             context_window_lines=args.context_window_lines,
+            verifier_mode=args.verifier_mode,
+            verifier_max_tokens=args.verifier_max_tokens,
+            verifier_retries=args.verifier_retries,
         ),
         prompt_output=sys.stdout if args.show_prompt else None,
         annotation_store=None if args.no_annotations else AnnotationStore(annotations_path),
@@ -287,6 +329,35 @@ def _resolve_path_from_workdir(path: Path, workdir: Path) -> Path:
     return (workdir / expanded).resolve()
 
 
+def prepare_annotations_for_run(
+    annotations_path: Path,
+    labeled_count: int,
+    reset_annotations: bool,
+) -> None:
+    if reset_annotations:
+        annotations_path.parent.mkdir(parents=True, exist_ok=True)
+        annotations_path.write_text("", encoding="utf-8")
+        return
+
+    annotation_count = count_annotation_records(annotations_path)
+    if annotation_count <= labeled_count:
+        return
+
+    raise ConfigError(
+        f"annotations output already has {annotation_count} record(s), but the label output has "
+        f"{labeled_count} label(s). This would append duplicate or stale annotation rows. "
+        "Clear the annotations file, choose a different --annotations-output path, or pass "
+        "--reset-annotations when intentionally starting a fresh annotation run."
+    )
+
+
+def count_annotation_records(annotations_path: Path) -> int:
+    if not annotations_path.exists():
+        return 0
+    with annotations_path.open("r", encoding="utf-8") as file:
+        return sum(1 for line in file if line.strip())
+
+
 def render_dry_run_report(
     config: DialoopConfig,
     python_status: CommandStatus,
@@ -298,6 +369,9 @@ def render_dry_run_report(
     search_limit: Optional[int] = None,
     previous_context_dialogues: Optional[int] = None,
     following_context_dialogues: Optional[int] = None,
+    verifier_mode: Optional[str] = None,
+    verifier_max_tokens: Optional[int] = None,
+    verifier_retries: Optional[int] = None,
 ) -> str:
     lines = [
         title,
@@ -329,6 +403,12 @@ def render_dry_run_report(
         lines.append(f"  previous_context_dialogues: {previous_context_dialogues}")
     if following_context_dialogues is not None:
         lines.append(f"  following_context_dialogues: {following_context_dialogues}")
+    if verifier_mode is not None:
+        lines.append(f"  verifier_mode: {verifier_mode}")
+    if verifier_max_tokens is not None:
+        lines.append(f"  verifier_max_tokens: {verifier_max_tokens}")
+    if verifier_retries is not None:
+        lines.append(f"  verifier_retries: {verifier_retries}")
     lines.extend(["", "Environment:"])
     lines.extend(f"  {line}" for line in _format_command_status(python_status))
     return "\n".join(lines)

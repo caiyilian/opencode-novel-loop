@@ -22,6 +22,8 @@ class AnnotationRecord:
     confidence: str
     tool_summary: dict[str, Any]
     recovery: Optional[dict[str, Any]] = None
+    risk: Optional[dict[str, Any]] = None
+    verifier: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,10 +37,32 @@ class AnnotationRecord:
             "confidence": self.confidence,
             "tool_summary": self.tool_summary,
             "recovery": self.recovery,
+            "risk": self.risk,
+            "verifier": self.verifier,
         }
 
     def to_json_line(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
+
+    def with_review(
+        self,
+        risk: Optional[dict[str, Any]],
+        verifier: Optional[dict[str, Any]] = None,
+    ) -> "AnnotationRecord":
+        return AnnotationRecord(
+            index=self.index,
+            line_number=self.line_number,
+            text=self.text,
+            speaker=self.speaker,
+            evidence_lines=list(self.evidence_lines),
+            reason=self.reason,
+            rejected_candidates=list(self.rejected_candidates),
+            confidence=self.confidence,
+            tool_summary=self.tool_summary,
+            recovery=self.recovery,
+            risk=risk,
+            verifier=verifier,
+        )
 
 
 class AnnotationStore:
