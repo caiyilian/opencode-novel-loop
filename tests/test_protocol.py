@@ -12,7 +12,17 @@ class ProtocolTest(unittest.TestCase):
 
         self.assertEqual(
             names,
-            {"get_next_dialogue", "read_novel", "search_novel", "submit_labels"},
+            {
+                "get_next_dialogue",
+                "read_novel",
+                "search_novel",
+                "locate_identity",
+                "resolve_identity",
+                "record_character",
+                "normalize_speaker",
+                "arbitrate_identity",
+                "submit_labels",
+            },
         )
         schema = openai_tools_schema()
         self.assertEqual(schema[0]["type"], "function")
@@ -31,6 +41,12 @@ class ProtocolTest(unittest.TestCase):
 
         self.assertEqual(action.action, "read_novel")
         self.assertEqual(action.args, {"start_line": 1, "end_line": 3})
+
+    def test_parse_json_action_accepts_identity_tools(self) -> None:
+        action = parse_json_action('{"action":"locate_identity","args":{"speaker":"girl"}}')
+
+        self.assertEqual(action.action, "locate_identity")
+        self.assertEqual(action.args, {"speaker": "girl"})
 
     def test_parse_json_action_from_fenced_json(self) -> None:
         action = parse_json_action(
