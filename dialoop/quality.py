@@ -127,6 +127,43 @@ class AnnotationSummary:
         return bool(self.json_errors or self.missing_fields)
 
 
+@dataclass(frozen=True)
+class AnnotationAttribution:
+    jsonl_line: int
+    risk_level: str
+    needs_verifier: str
+    verifier_verdict: str
+    verifier_reason: Optional[str]
+    confidence: str
+    risk_signal_codes: list[str]
+
+
+@dataclass(frozen=True)
+class MismatchAttribution:
+    mismatch: LabelMismatch
+    annotation: Optional[AnnotationAttribution]
+    diagnostic_hints: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MismatchAttributionReport:
+    evaluation: EvaluationReport
+    annotations_path: Path
+    annotation_records: int
+    items: list[MismatchAttribution] = field(default_factory=list)
+    missing_annotation_indices: list[int] = field(default_factory=list)
+    risk_level_counts: Counter[str] = field(default_factory=Counter)
+    verifier_verdict_counts: Counter[str] = field(default_factory=Counter)
+    confidence_counts: Counter[str] = field(default_factory=Counter)
+    risk_signal_counts: Counter[str] = field(default_factory=Counter)
+    diagnostic_hint_counts: Counter[str] = field(default_factory=Counter)
+    category_counts: Counter[str] = field(default_factory=Counter)
+
+    @property
+    def matched_annotations(self) -> int:
+        return len(self.items) - len(self.missing_annotation_indices)
+
+
 ANNOTATION_REQUIRED_FIELDS = (
     "index",
     "line_number",
@@ -139,6 +176,13 @@ ANNOTATION_REQUIRED_FIELDS = (
     "tool_summary",
     "risk",
     "verifier",
+)
+
+DIAGNOSTIC_SECOND_PERSON_MARKERS = ("\u4f60", "\u60a8", "\u6c5d")
+DIAGNOSTIC_PUNCTUATION_CHARS = set(
+    " \t\r\n.,!?;:'\"()[]{}<>~"
+    + "\uff0c\u3002\uff01\uff1f\uff1b\uff1a\u3001\u201c\u201d\u2018\u2019"
+    + "\uff08\uff09\u3010\u3011\u300a\u300b\u2026\u2014"
 )
 
 
@@ -434,6 +478,215 @@ def render_annotation_summary(summary: AnnotationSummary, show_problems: int = 0
     return "\n".join(lines)
 
 
+def attribute_mismatches(
+    *,
+    answer_path: Path,
+    labels_path: Path,
+    annotations_path: Path,
+    novel_path: Optional[Path] = None,
+) -> MismatchAttributionReport:
+    evaluation = evaluate_labels(answer_path=answer_path, labels_path=labels_path, novel_path=novel_path)
+    labels = load_label_lines(labels_path)
+    annotations = load_annotation_attributions(annotations_path)
+    line_dialogue_counts: Counter[int] = Counter()
+    if novel_path is not None:
+        line_dialogue_counts = Counter(
+            dialogue.line_number for dialogue in DialogueIndex.from_file(novel_path).dialogues
+        )
+
+    items: list[MismatchAttribution] = []
+    missing_annotation_indices: list[int] = []
+    risk_level_counts: Counter[str] = Counter()
+    verifier_verdict_counts: Counter[str] = Counter()
+    confidence_counts: Counter[str] = Counter()
+    risk_signal_counts: Counter[str] = Counter()
+    diagnostic_hint_counts: Counter[str] = Counter()
+    category_counts: Counter[str] = Counter()
+
+    for mismatch in evaluation.mismatches:
+        annotation = annotations.get(mismatch.index)
+        if annotation is None:
+            missing_annotation_indices.append(mismatch.index)
+            risk_level = "missing"
+            verifier_verdict = "missing"
+            confidence = "missing"
+            risk_signal_codes: list[str] = []
+        else:
+            risk_level = annotation.risk_level
+            verifier_verdict = annotation.verifier_verdict
+            confidence = annotation.confidence
+            risk_signal_codes = annotation.risk_signal_codes
+
+        hints = mismatch_diagnostic_hints(
+            mismatch=mismatch,
+            annotation=annotation,
+            labels=labels,
+            line_dialogue_counts=line_dialogue_counts,
+        )
+        item = MismatchAttribution(mismatch=mismatch, annotation=annotation, diagnostic_hints=hints)
+        items.append(item)
+
+        risk_level_counts[risk_level] += 1
+        verifier_verdict_counts[verifier_verdict] += 1
+        confidence_counts[confidence] += 1
+        diagnostic_hint_counts.update(hints or ["none"])
+        if risk_signal_codes:
+            risk_signal_counts.update(risk_signal_codes)
+        else:
+            risk_signal_counts["none"] += 1
+        category_counts.update(_mismatch_categories(annotation))
+
+    return MismatchAttributionReport(
+        evaluation=evaluation,
+        annotations_path=annotations_path.expanduser().resolve(),
+        annotation_records=len(annotations),
+        items=items,
+        missing_annotation_indices=missing_annotation_indices,
+        risk_level_counts=risk_level_counts,
+        verifier_verdict_counts=verifier_verdict_counts,
+        confidence_counts=confidence_counts,
+        risk_signal_counts=risk_signal_counts,
+        diagnostic_hint_counts=diagnostic_hint_counts,
+        category_counts=category_counts,
+    )
+
+
+def load_annotation_attributions(annotations_path: Path) -> dict[int, AnnotationAttribution]:
+    resolved = annotations_path.expanduser().resolve()
+    if not resolved.exists():
+        raise QualityError(f"annotations file does not exist: {resolved}")
+    if not resolved.is_file():
+        raise QualityError(f"annotations path is not a file: {resolved}")
+
+    annotations: dict[int, AnnotationAttribution] = {}
+    with resolved.open("r", encoding="utf-8") as file:
+        for jsonl_line, raw_line in enumerate(file, start=1):
+            raw = raw_line.strip()
+            if not raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError as error:
+                raise QualityError(f"annotation jsonl line {jsonl_line} is invalid JSON: {error}") from error
+            if not isinstance(row, dict):
+                raise QualityError(f"annotation jsonl line {jsonl_line} must be a JSON object")
+            index = _optional_int(row.get("index"))
+            if index is None:
+                raise QualityError(f"annotation jsonl line {jsonl_line} has no integer index")
+            if index in annotations:
+                raise QualityError(f"duplicate annotation index: {index}")
+
+            risk = row.get("risk") if isinstance(row.get("risk"), dict) else {}
+            verifier = row.get("verifier") if isinstance(row.get("verifier"), dict) else {}
+            annotations[index] = AnnotationAttribution(
+                jsonl_line=jsonl_line,
+                risk_level=_counter_key(risk.get("level")),
+                needs_verifier=_counter_key(risk.get("needs_verifier")),
+                verifier_verdict=_counter_key(verifier.get("verdict")),
+                verifier_reason=_optional_str(verifier.get("reason")),
+                confidence=_counter_key(row.get("confidence")),
+                risk_signal_codes=_risk_signal_codes(risk),
+            )
+    return annotations
+
+
+def mismatch_diagnostic_hints(
+    *,
+    mismatch: LabelMismatch,
+    annotation: Optional[AnnotationAttribution],
+    labels: list[str],
+    line_dialogue_counts: Counter[int],
+) -> list[str]:
+    hints: list[str] = []
+    existing_signals = set(annotation.risk_signal_codes if annotation else [])
+    semantic_length = _diagnostic_semantic_length(mismatch.text)
+
+    if semantic_length <= 4 and not (
+        {"short_dialogue", "very_short_dialogue"} & existing_signals
+    ):
+        hints.append("short_dialogue_hint")
+    if ("?" in mismatch.text or "\uff1f" in mismatch.text) and semantic_length <= 8:
+        if "short_question" not in existing_signals:
+            hints.append("short_question_hint")
+    if any(marker in mismatch.text for marker in DIAGNOSTIC_SECOND_PERSON_MARKERS):
+        if "second_person_address" not in existing_signals:
+            hints.append("second_person_hint")
+    if line_dialogue_counts.get(mismatch.line_number, 0) > 1:
+        hints.append("same_line_multiple_dialogues")
+    if _adjacent_label_matches_expected(mismatch, labels):
+        hints.append("adjacent_turn_order")
+    if annotation is not None and annotation.confidence == "high":
+        hints.append("high_confidence_wrong")
+    if annotation is None or annotation.verifier_verdict == "none":
+        hints.append("no_verifier_review")
+
+    return hints
+
+
+def render_mismatch_attribution_report(
+    report: MismatchAttributionReport,
+    max_errors: Optional[int] = 50,
+) -> str:
+    evaluation = report.evaluation
+    lines = [
+        "Dialoop mismatch attribution",
+        f"  expected: {evaluation.expected_count}",
+        f"  labels: {evaluation.label_count}",
+        f"  compared: {evaluation.compared_count}",
+        f"  correct: {evaluation.correct_count}",
+        f"  incorrect: {evaluation.incorrect_count}",
+        f"  accuracy: {evaluation.accuracy * 100:.2f}%",
+        f"  annotations: {report.annotations_path}",
+        f"  annotation_records: {report.annotation_records}",
+        f"  matched_mismatches: {report.matched_annotations}",
+        f"  missing_annotations: {len(report.missing_annotation_indices)}",
+    ]
+    if evaluation.novel_dialogue_count is not None:
+        lines.append(f"  novel_dialogues: {evaluation.novel_dialogue_count}")
+    lines.extend(
+        [
+            "",
+            "Mismatch groups:",
+            f"  risk.level: {_render_counter(report.risk_level_counts, ['high', 'medium', 'low', 'none', 'missing'])}",
+            (
+                "  verifier.verdict: "
+                f"{_render_counter(report.verifier_verdict_counts, ['fail', 'error', 'uncertain', 'pass', 'none', 'missing'])}"
+            ),
+            f"  confidence: {_render_counter(report.confidence_counts, ['low', 'medium', 'high', 'none', 'missing'])}",
+            f"  risk.signals: {_render_counter(report.risk_signal_counts, ['none'])}",
+            f"  diagnostic_hints: {_render_counter(report.diagnostic_hint_counts, ['none'])}",
+            (
+                "  categories: "
+                f"{_render_counter(report.category_counts, ['medium_or_lower_risk_no_verifier', 'high_risk_verifier_pass', 'verifier_uncertain', 'high_confidence', 'missing_annotation'])}"
+            ),
+        ]
+    )
+    if report.items:
+        lines.append("")
+        lines.append("Mismatches:")
+        shown = report.items if max_errors is None else report.items[:max_errors]
+        for item in shown:
+            mismatch = item.mismatch
+            annotation = item.annotation
+            risk = annotation.risk_level if annotation is not None else "missing"
+            verifier = annotation.verifier_verdict if annotation is not None else "missing"
+            confidence = annotation.confidence if annotation is not None else "missing"
+            signals = ",".join(annotation.risk_signal_codes) if annotation and annotation.risk_signal_codes else "none"
+            hints = ",".join(item.diagnostic_hints) if item.diagnostic_hints else "none"
+            verifier_reason = annotation.verifier_reason if annotation and annotation.verifier_reason else "none"
+            lines.append(
+                f"  - index={mismatch.index} line={mismatch.line_number} "
+                f"expected={mismatch.expected} actual={mismatch.actual} "
+                f"risk={risk} verifier={verifier} confidence={confidence} "
+                f"signals={signals} hints={hints} verifier_reason={verifier_reason} "
+                f"text={mismatch.text}"
+            )
+        hidden = len(report.items) - len(shown)
+        if hidden > 0:
+            lines.append(f"  ... {hidden} more mismatch(es) omitted")
+    return "\n".join(lines)
+
+
 def load_terms(*, terms: Iterable[str] = (), terms_file: Optional[Path] = None) -> list[str]:
     loaded = [term.strip() for term in terms if term.strip()]
     if terms_file is not None:
@@ -514,6 +767,47 @@ def render_term_scan_report(matches: list[TermMatch], terms: list[str], paths: l
                 f"  - {match.path}:{match.line_number} term={match.term} line={match.line.strip()}"
             )
     return "\n".join(lines)
+
+
+def _risk_signal_codes(risk: dict[str, Any]) -> list[str]:
+    signals = risk.get("signals")
+    if not isinstance(signals, list):
+        return []
+    codes: list[str] = []
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        code = _optional_str(signal.get("code"))
+        if code:
+            codes.append(code)
+    return codes
+
+
+def _mismatch_categories(annotation: Optional[AnnotationAttribution]) -> list[str]:
+    if annotation is None:
+        return ["missing_annotation"]
+    categories: list[str] = []
+    if annotation.risk_level in {"low", "medium"} and annotation.verifier_verdict == "none":
+        categories.append("medium_or_lower_risk_no_verifier")
+    if annotation.risk_level == "high" and annotation.verifier_verdict == "pass":
+        categories.append("high_risk_verifier_pass")
+    if annotation.verifier_verdict == "uncertain":
+        categories.append("verifier_uncertain")
+    if annotation.confidence == "high":
+        categories.append("high_confidence")
+    return categories or ["other"]
+
+
+def _diagnostic_semantic_length(text: str) -> int:
+    return sum(1 for char in text if char not in DIAGNOSTIC_PUNCTUATION_CHARS)
+
+
+def _adjacent_label_matches_expected(mismatch: LabelMismatch, labels: list[str]) -> bool:
+    expected_speakers = [speaker.strip() for speaker in mismatch.expected.split("|") if speaker.strip()]
+    if mismatch.index > 0 and labels[mismatch.index - 1] in expected_speakers:
+        return True
+    next_index = mismatch.index + 1
+    return next_index < len(labels) and labels[next_index] in expected_speakers
 
 
 def _optional_int(value: object) -> Optional[int]:
