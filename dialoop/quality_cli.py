@@ -8,11 +8,13 @@ from typing import Optional, Sequence
 from .quality import (
     DEFAULT_SCAN_PATHS,
     QualityError,
+    attribute_mismatches,
     evaluate_labels,
     load_terms,
     render_annotation_summary,
     render_error_labels,
     render_evaluation_report,
+    render_mismatch_attribution_report,
     render_term_scan_report,
     scan_terms,
     summarize_annotations,
@@ -98,6 +100,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the first N verifier or structural problems.",
     )
 
+    attribution = subparsers.add_parser(
+        "mismatch-attribution",
+        help="Explain answer mismatches using annotation risk and verifier metadata.",
+    )
+    attribution.add_argument("--answers", type=Path, required=True, help="Annotated answer text file or directory.")
+    attribution.add_argument("--labels", type=Path, required=True, help="One-speaker-per-line label file.")
+    attribution.add_argument(
+        "--annotations",
+        type=Path,
+        required=True,
+        help="Path to .dialoop/annotations.jsonl.",
+    )
+    attribution.add_argument(
+        "--novel",
+        type=Path,
+        help="Optional source novel file for dialogue count and same-line dialogue hints.",
+    )
+    attribution.add_argument(
+        "--max-errors",
+        type=positive_int,
+        default=50,
+        help="Maximum mismatch attribution rows to print.",
+    )
+    attribution.add_argument(
+        "--all-errors",
+        action="store_true",
+        help="Print all mismatch attribution rows.",
+    )
+
     return parser
 
 
@@ -111,6 +142,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_scan_terms(args)
         if args.command == "annotations-summary":
             return run_annotations_summary(args)
+        if args.command == "mismatch-attribution":
+            return run_mismatch_attribution(args)
     except QualityError as error:
         parser.exit(2, f"dialoop-quality: error: {error}\n")
     raise AssertionError(f"unhandled command: {args.command}")
@@ -140,6 +173,18 @@ def run_annotations_summary(args: argparse.Namespace) -> int:
     return 1 if summary.has_structural_errors else 0
 
 
+def run_mismatch_attribution(args: argparse.Namespace) -> int:
+    report = attribute_mismatches(
+        answer_path=args.answers,
+        labels_path=args.labels,
+        annotations_path=args.annotations,
+        novel_path=args.novel,
+    )
+    max_errors = None if args.all_errors else args.max_errors
+    print(render_mismatch_attribution_report(report, max_errors=max_errors))
+    return 0
+
+
 def evaluate_main(argv: Optional[Sequence[str]] = None) -> int:
     return main(["evaluate", *(argv if argv is not None else sys.argv[1:])])
 
@@ -150,6 +195,10 @@ def scan_terms_main(argv: Optional[Sequence[str]] = None) -> int:
 
 def annotations_summary_main(argv: Optional[Sequence[str]] = None) -> int:
     return main(["annotations-summary", *(argv if argv is not None else sys.argv[1:])])
+
+
+def mismatch_attribution_main(argv: Optional[Sequence[str]] = None) -> int:
+    return main(["mismatch-attribution", *(argv if argv is not None else sys.argv[1:])])
 
 
 if __name__ == "__main__":

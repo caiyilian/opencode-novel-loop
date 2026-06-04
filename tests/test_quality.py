@@ -9,11 +9,13 @@ from pathlib import Path
 
 from dialoop.quality import (
     QualityError,
+    attribute_mismatches,
     evaluate_labels,
     extract_expected_dialogues,
     load_terms,
     render_annotation_summary,
     render_error_labels,
+    render_mismatch_attribution_report,
     scan_terms,
     summarize_annotations,
 )
@@ -236,6 +238,117 @@ class QualityTest(unittest.TestCase):
         self.assertIn("Dialoop annotations summary", stdout.getvalue())
         self.assertIn("verifier.verdict: uncertain=1", stdout.getvalue())
         self.assertIn("kind=verifier_uncertain", stdout.getvalue())
+
+    def test_attribute_mismatches_groups_annotation_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            answers_path = root / "answers.txt"
+            labels_path = root / "labels.txt"
+            annotations_path = root / "annotations.jsonl"
+            novel_path = root / "novel.txt"
+            answers_path.write_text(
+                "\u3010A\u3011\u300cwho?\u300d\u3010B\u3011\u300chi\u300d\n"
+                "\u3010C\u3011\u300cthanks\u300d\n",
+                encoding="utf-8",
+            )
+            labels_path.write_text("B\nA\nC\n", encoding="utf-8")
+            novel_path.write_text("\u300cwho?\u300d\u300chi\u300d\n\u300cthanks\u300d\n", encoding="utf-8")
+            rows = [
+                {
+                    "index": 0,
+                    "confidence": "high",
+                    "risk": {
+                        "level": "high",
+                        "needs_verifier": True,
+                        "signals": [{"code": "short_question", "level": "medium"}],
+                    },
+                    "verifier": {"enabled": True, "verdict": "pass", "reason": "looks supported"},
+                },
+                {
+                    "index": 1,
+                    "confidence": "high",
+                    "risk": {"level": "medium", "needs_verifier": False, "signals": []},
+                    "verifier": None,
+                },
+                {
+                    "index": 2,
+                    "confidence": "high",
+                    "risk": {"level": "low", "needs_verifier": False, "signals": []},
+                    "verifier": None,
+                },
+            ]
+            annotations_path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+                encoding="utf-8",
+            )
+
+            report = attribute_mismatches(
+                answer_path=answers_path,
+                labels_path=labels_path,
+                annotations_path=annotations_path,
+                novel_path=novel_path,
+            )
+            rendered = render_mismatch_attribution_report(report, max_errors=1)
+
+        self.assertEqual(report.evaluation.incorrect_count, 2)
+        self.assertEqual(report.risk_level_counts["high"], 1)
+        self.assertEqual(report.risk_level_counts["medium"], 1)
+        self.assertEqual(report.verifier_verdict_counts["pass"], 1)
+        self.assertEqual(report.verifier_verdict_counts["none"], 1)
+        self.assertEqual(report.category_counts["high_risk_verifier_pass"], 1)
+        self.assertEqual(report.category_counts["medium_or_lower_risk_no_verifier"], 1)
+        self.assertEqual(report.category_counts["high_confidence"], 2)
+        self.assertIn("risk.level: high=1, medium=1", rendered)
+        self.assertIn("verifier.verdict: pass=1, none=1", rendered)
+        self.assertIn("risk.signals: none=1, short_question=1", rendered)
+        self.assertIn("diagnostic_hints:", rendered)
+        self.assertIn("same_line_multiple_dialogues", rendered)
+        self.assertIn("index=0 line=1 expected=A actual=B risk=high verifier=pass", rendered)
+        self.assertIn("... 1 more mismatch(es) omitted", rendered)
+
+    def test_quality_cli_mismatch_attribution_reports_grouped_mismatches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            answers_path = root / "answers.txt"
+            labels_path = root / "labels.txt"
+            annotations_path = root / "annotations.jsonl"
+            answers_path.write_text(
+                "\u3010A\u3011\u300cfirst\u300d\n\u3010B\u3011\u300csecond\u300d\n",
+                encoding="utf-8",
+            )
+            labels_path.write_text("B\nB\n", encoding="utf-8")
+            annotations_path.write_text(
+                json.dumps(
+                    {
+                        "index": 0,
+                        "confidence": "high",
+                        "risk": {"level": "high", "needs_verifier": True, "signals": []},
+                        "verifier": {"enabled": True, "verdict": "pass", "reason": "pass reason"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "mismatch-attribution",
+                        "--answers",
+                        str(answers_path),
+                        "--labels",
+                        str(labels_path),
+                        "--annotations",
+                        str(annotations_path),
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Dialoop mismatch attribution", stdout.getvalue())
+        self.assertIn("incorrect: 1", stdout.getvalue())
+        self.assertIn("verifier.verdict: pass=1", stdout.getvalue())
+        self.assertIn("verifier_reason=pass reason", stdout.getvalue())
 
 def annotation_row(
     *,
