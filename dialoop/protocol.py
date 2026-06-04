@@ -84,6 +84,121 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
             },
         ),
         ToolSpec(
+            name="locate_identity",
+            description=(
+                "Bounded lookahead helper for temporary speaker identities. "
+                "It scans later novel lines for likely identity introduction ranges and returns candidates only; "
+                "it never changes labels."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "speaker": {"type": "string", "minLength": 1},
+                    "dialogue_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Optional dialogue index to anchor the search; defaults to the active batch.",
+                    },
+                    "search_after_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based line to start searching after.",
+                    },
+                    "lookahead_lines": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional bounded lookahead line count.",
+                    },
+                    "max_candidates": {"type": "integer", "minimum": 1},
+                },
+                "required": ["speaker"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name="resolve_identity",
+            description=(
+                "Read a bounded candidate range and decide whether it contains a stable name for a temporary speaker. "
+                "Returns resolved, not_same_person, or not_enough_evidence style metadata; it never changes labels."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "speaker": {"type": "string", "minLength": 1},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
+                    "dialogue_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Optional dialogue index for current-dialogue context.",
+                    },
+                },
+                "required": ["speaker", "start_line", "end_line"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name="record_character",
+            description=(
+                "Add or update a lightweight character library entry with evidence-backed aliases and summary. "
+                "This is an auxiliary memory tool and does not overwrite submitted labels."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "display_name": {"type": "string", "minLength": 1},
+                    "aliases": {"type": "array", "items": {"type": "string"}},
+                    "summary": {"type": "string"},
+                    "evidence_lines": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                    },
+                    "last_seen_dialogue_index": {"type": "integer", "minimum": 0},
+                    "last_seen_line_number": {"type": "integer", "minimum": 1},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                },
+                "required": ["display_name"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name="normalize_speaker",
+            description=(
+                "Ask the lightweight character library whether a speaker alias should map to an existing display_name. "
+                "Returns a suggestion only; the model must still submit the final speaker explicitly."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "speaker": {"type": "string", "minLength": 1},
+                },
+                "required": ["speaker"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name="arbitrate_identity",
+            description=(
+                "Resolve conflicts between Labeler, Verifier, Identity Resolver, and Name Normalizer conclusions. "
+                "Returns a recommendation only; it never writes labels."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "labeler_speaker": {"type": "string", "minLength": 1},
+                    "verifier_verdict": {"type": "string", "enum": ["pass", "fail", "uncertain", "error"]},
+                    "resolver_verdict": {
+                        "type": "string",
+                        "enum": ["resolved", "not_same_person", "not_enough_evidence"],
+                    },
+                    "resolver_speaker": {"type": "string"},
+                    "normalizer_speaker": {"type": "string"},
+                },
+                "required": ["labeler_speaker"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
             name="submit_labels",
             description=(
                 "Submit one speaker name for each dialogue in the active batch, in order. "

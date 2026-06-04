@@ -306,6 +306,110 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(rows[1]["evidence_lines"], [2])
             self.assertEqual(rows[1]["confidence"], "medium")
 
+    def test_identity_tools_are_available_in_loop_and_annotation_summary(self) -> None:
+        text = "\n".join(
+            [
+                "\u5c11\u5973\u8bf4\uff1a\u300cHelp.\u300d",
+                "\u5979\u540e\u6765\u8bf4\uff1a\u300c\u6211\u53eb\u963f\u6d1b\u3002\u300d",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
+            tools = DialoopLocalTools(DialogueIndex.from_text(text), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="locate",
+                                name="locate_identity",
+                                arguments={"speaker": "\u5c11\u5973"},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="resolve",
+                                name="resolve_identity",
+                                arguments={"speaker": "\u5c11\u5973", "start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="record",
+                                name="record_character",
+                                arguments={
+                                    "display_name": "\u963f\u6d1b",
+                                    "aliases": ["\u5c11\u5973"],
+                                    "evidence_lines": [2],
+                                    "confidence": "high",
+                                },
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="normalize",
+                                name="normalize_speaker",
+                                arguments={"speaker": "\u5c11\u5973"},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="arbitrate",
+                                name="arbitrate_identity",
+                                arguments={
+                                    "labeler_speaker": "\u5c11\u5973",
+                                    "resolver_verdict": "resolved",
+                                    "resolver_speaker": "\u963f\u6d1b",
+                                    "normalizer_speaker": "\u963f\u6d1b",
+                                },
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["\u963f\u6d1b"], "evidence_lines": [2]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=6),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            row = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
+            labels_text = labels.read_text(encoding="utf-8")
+
+        self.assertTrue(result.submitted)
+        self.assertEqual(labels_text, "\u963f\u6d1b\n")
+        self.assertEqual(row["speaker"], "\u963f\u6d1b")
+        self.assertEqual(row["tool_summary"]["locate_identity"][0]["candidate_count"], 1)
+        self.assertEqual(row["tool_summary"]["resolve_identity"][0]["recommended_speaker"], "\u963f\u6d1b")
+        self.assertEqual(row["tool_summary"]["record_character"][0]["display_name"], "\u963f\u6d1b")
+        self.assertEqual(row["tool_summary"]["normalize_speaker"][0]["suggested_display_name"], "\u963f\u6d1b")
+        self.assertEqual(row["tool_summary"]["arbitrate_identity"][0]["decision"], "use_resolved_identity")
+
     def test_json_action_loop_submits_labels_without_native_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             labels = Path(directory) / "labels.txt"

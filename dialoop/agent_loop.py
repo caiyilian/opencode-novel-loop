@@ -96,6 +96,9 @@ def system_prompt(protocol: str) -> str:
         "如果没有姓名但上下文有身份或群体，请用中文身份词，例如：村民、骑士、店员、商人、众人、未知。"
         "不要用临时行为关系替代更稳定身份；例如上下文说明是村落居民时，用“村民”而不是“顾客”。"
         "如果当前上下文只给出“女孩”“少年”“老人”等临时描述，但这是一个可追踪的具体人物，且后文在有限范围内揭示其姓名或稳定称呼，请使用后文揭示的姓名或稳定称呼。"
+        "遇到这种身份后置情况时，可以先调用 locate_identity 查找后文候选区域，再调用 resolve_identity 细读候选区域；查找必须受限，不要无限向后搜索。"
+        "如果已有角色库条目，可以调用 normalize_speaker 获取显示名归一建议；该建议只辅助判断，不能自动覆盖原文证据或 submit_labels 的最终 speaker。"
+        "当 Labeler、Verifier、Identity Resolver 或 Normalizer 结论冲突时，可以调用 arbitrate_identity 获取裁决建议；最终仍必须用 submit_labels 明确提交。"
         "不要为了无名群体、路人或临时职能角色无限寻找姓名；只有具体人物明显会继续参与场景时，才进行有限的后文确认。"
         "如果引号内容明显不是人物说话，而是叙述中的环境声、物体声音、心理比喻声或声音效果，请标注为“非人物发声”；如果文本明确说明某个角色发出该声音，如喊叫、叹息、笑声或嚎叫，仍标注该角色。"
         "短句、追问、省略号、沉默或半句话要重点参考相邻对话和最近已标注结果；不要机械沿用上一句说话人。"
@@ -150,6 +153,15 @@ def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str
         )
         for dialogue in following_dialogues:
             lines.append(f"- index={dialogue['index']} 行号={dialogue['line_number']} 文本={dialogue['text']}")
+    known_characters = batch_result.get("known_characters", [])
+    if known_characters:
+        lines.extend(["", "轻量角色库（仅作显示名/别名线索，不可替代原文证据）："])
+        for character in known_characters:
+            aliases = ", ".join(character.get("aliases", [])) or "none"
+            lines.append(
+                f"- {character.get('display_name')} aliases={aliases} "
+                f"confidence={character.get('confidence')} last_seen={character.get('last_seen_dialogue_index')}"
+            )
     lines.extend(
         [
             "",
@@ -376,6 +388,41 @@ class AgentRunner:
                     keyword=required_str(args, "keyword"),
                     limit=optional_int(args, "limit"),
                 )
+            elif name == "locate_identity":
+                result = self.tools.locate_identity(
+                    speaker=required_str(args, "speaker"),
+                    dialogue_index=optional_int(args, "dialogue_index"),
+                    search_after_line=optional_int(args, "search_after_line"),
+                    lookahead_lines=optional_int(args, "lookahead_lines"),
+                    max_candidates=optional_int(args, "max_candidates") or 3,
+                )
+            elif name == "resolve_identity":
+                result = self.tools.resolve_identity(
+                    speaker=required_str(args, "speaker"),
+                    start_line=required_int(args, "start_line"),
+                    end_line=required_int(args, "end_line"),
+                    dialogue_index=optional_int(args, "dialogue_index"),
+                )
+            elif name == "record_character":
+                result = self.tools.record_character(
+                    display_name=required_str(args, "display_name"),
+                    aliases=optional_str_list(args, "aliases"),
+                    summary=optional_str(args, "summary") or "",
+                    evidence_lines=optional_int_list(args, "evidence_lines"),
+                    last_seen_dialogue_index=optional_int(args, "last_seen_dialogue_index"),
+                    last_seen_line_number=optional_int(args, "last_seen_line_number"),
+                    confidence=optional_str(args, "confidence") or "medium",
+                )
+            elif name == "normalize_speaker":
+                result = self.tools.normalize_speaker(speaker=required_str(args, "speaker"))
+            elif name == "arbitrate_identity":
+                result = self.tools.arbitrate_identity(
+                    labeler_speaker=required_str(args, "labeler_speaker"),
+                    verifier_verdict=optional_str(args, "verifier_verdict"),
+                    resolver_verdict=optional_str(args, "resolver_verdict"),
+                    resolver_speaker=optional_str(args, "resolver_speaker"),
+                    normalizer_speaker=optional_str(args, "normalizer_speaker"),
+                )
             elif name == "submit_labels":
                 result = self._execute_submit_labels(args)
             else:
@@ -387,7 +434,7 @@ class AgentRunner:
         except ToolValidationError as error:
             result = {"accepted": False, "error": str(error)}
 
-        if name in {"read_novel", "search_novel"} and "error" not in result:
+        if name in {"read_novel", "search_novel", "locate_identity", "resolve_identity"} and "error" not in result:
             self._used_context_tool = True
 
         return ToolExecution(name=name, result=result, arguments=dict(args))
@@ -520,6 +567,11 @@ def summarize_tool_history(history: list[ToolExecution]) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "read_novel": [],
         "search_novel": [],
+        "locate_identity": [],
+        "resolve_identity": [],
+        "record_character": [],
+        "normalize_speaker": [],
+        "arbitrate_identity": [],
         "submit_labels": [],
     }
 
@@ -541,6 +593,59 @@ def summarize_tool_history(history: list[ToolExecution]) -> dict[str, Any]:
                     "limit": execution.arguments.get("limit"),
                     "total_matches": execution.result.get("total_matches"),
                     "truncated": execution.result.get("truncated", False),
+                }
+            )
+        elif execution.name == "locate_identity":
+            summary["locate_identity"].append(
+                {
+                    "speaker": execution.arguments.get("speaker"),
+                    "dialogue_index": execution.arguments.get("dialogue_index"),
+                    "search_start_line": execution.result.get("search_start_line"),
+                    "search_end_line": execution.result.get("search_end_line"),
+                    "round": execution.result.get("round"),
+                    "round_limit": execution.result.get("round_limit"),
+                    "round_limit_reached": execution.result.get("round_limit_reached", False),
+                    "candidate_count": len(execution.result.get("candidates", []))
+                    if isinstance(execution.result.get("candidates"), list)
+                    else 0,
+                }
+            )
+        elif execution.name == "resolve_identity":
+            summary["resolve_identity"].append(
+                {
+                    "speaker": execution.arguments.get("speaker"),
+                    "start_line": execution.arguments.get("start_line"),
+                    "end_line": execution.arguments.get("end_line"),
+                    "verdict": execution.result.get("verdict"),
+                    "recommended_speaker": execution.result.get("recommended_speaker"),
+                    "evidence_lines": execution.result.get("evidence_lines"),
+                }
+            )
+        elif execution.name == "record_character":
+            record = execution.result.get("record") if isinstance(execution.result.get("record"), dict) else {}
+            summary["record_character"].append(
+                {
+                    "display_name": record.get("display_name"),
+                    "aliases": record.get("aliases"),
+                    "confidence": record.get("confidence"),
+                }
+            )
+        elif execution.name == "normalize_speaker":
+            summary["normalize_speaker"].append(
+                {
+                    "speaker": execution.arguments.get("speaker"),
+                    "suggested_display_name": execution.result.get("suggested_display_name"),
+                    "matched": execution.result.get("matched"),
+                    "confidence": execution.result.get("confidence"),
+                }
+            )
+        elif execution.name == "arbitrate_identity":
+            summary["arbitrate_identity"].append(
+                {
+                    "labeler_speaker": execution.arguments.get("labeler_speaker"),
+                    "decision": execution.result.get("decision"),
+                    "recommended_speaker": execution.result.get("recommended_speaker"),
+                    "reason": execution.result.get("reason"),
                 }
             )
         elif execution.name == "submit_labels":
@@ -659,10 +764,31 @@ def required_str(args: dict[str, Any], name: str) -> str:
     return value
 
 
+def optional_str(args: dict[str, Any], name: str) -> Optional[str]:
+    if name not in args or args[name] is None:
+        return None
+    return required_str(args, name)
+
+
 def required_str_list(args: dict[str, Any], name: str) -> list[str]:
     value = args[name]
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ToolValidationError(f"{name} must be a list of strings")
+    return value
+
+
+def optional_str_list(args: dict[str, Any], name: str) -> Optional[list[str]]:
+    if name not in args or args[name] is None:
+        return None
+    return required_str_list(args, name)
+
+
+def optional_int_list(args: dict[str, Any], name: str) -> Optional[list[int]]:
+    if name not in args or args[name] is None:
+        return None
+    value = args[name]
+    if not isinstance(value, list) or any(type(item) is not int for item in value):
+        raise ToolValidationError(f"{name} must be a list of integers")
     return value
 
 

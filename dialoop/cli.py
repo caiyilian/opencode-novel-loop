@@ -131,6 +131,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Following unlabeled neighboring dialogues to include in each batch prompt.",
     )
     parser.add_argument(
+        "--identity-lookahead-lines",
+        type=positive_int,
+        default=120,
+        help="Maximum later novel lines scanned by one identity lookahead helper call.",
+    )
+    parser.add_argument(
+        "--identity-lookahead-rounds",
+        type=non_negative_int,
+        default=2,
+        help="Soft maximum identity lookahead rounds for one temporary speaker.",
+    )
+    parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
         help="OpenAI-compatible model endpoint base URL.",
@@ -246,6 +258,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 search_limit=args.search_limit,
                 previous_context_dialogues=args.previous_context_dialogues,
                 following_context_dialogues=args.following_context_dialogues,
+                identity_lookahead_lines=args.identity_lookahead_lines,
+                identity_lookahead_rounds=args.identity_lookahead_rounds,
                 verifier_mode=args.verifier_mode,
                 verifier_max_tokens=args.verifier_max_tokens,
                 verifier_retries=args.verifier_retries,
@@ -264,6 +278,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         search_limit=args.search_limit,
         previous_context_dialogues=args.previous_context_dialogues,
         following_context_dialogues=args.following_context_dialogues,
+        identity_lookahead_lines=args.identity_lookahead_lines,
+        identity_lookahead_rounds=args.identity_lookahead_rounds,
     )
     if not args.no_annotations:
         try:
@@ -369,6 +385,8 @@ def render_dry_run_report(
     search_limit: Optional[int] = None,
     previous_context_dialogues: Optional[int] = None,
     following_context_dialogues: Optional[int] = None,
+    identity_lookahead_lines: Optional[int] = None,
+    identity_lookahead_rounds: Optional[int] = None,
     verifier_mode: Optional[str] = None,
     verifier_max_tokens: Optional[int] = None,
     verifier_retries: Optional[int] = None,
@@ -403,6 +421,10 @@ def render_dry_run_report(
         lines.append(f"  previous_context_dialogues: {previous_context_dialogues}")
     if following_context_dialogues is not None:
         lines.append(f"  following_context_dialogues: {following_context_dialogues}")
+    if identity_lookahead_lines is not None:
+        lines.append(f"  identity_lookahead_lines: {identity_lookahead_lines}")
+    if identity_lookahead_rounds is not None:
+        lines.append(f"  identity_lookahead_rounds: {identity_lookahead_rounds}")
     if verifier_mode is not None:
         lines.append(f"  verifier_mode: {verifier_mode}")
     if verifier_max_tokens is not None:
