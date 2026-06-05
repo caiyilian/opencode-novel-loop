@@ -937,17 +937,17 @@ Risk Judge / Verifier 的结构化输出建议：
 - 风险触发原因要写入 `.dialoop/annotations.jsonl`，例如 `risk_reasons: ["short_dialogue", "turn_pattern_suspicious"]`。
 - 每条复核都有明确原因，不能只记录“模型觉得不确定”。
 
-#### 阶段 5D：主 agent 与子 agent 分工
+#### 阶段 5D：主 agent 与辅助工具分工（阶段 6 前置）
 
-目标：把“主 agent / 子 agent”定义清楚。阶段 5 的主 agent 不是负责亲自读完整卷小说的超级模型，而是质量协调者；子 agent 才执行具体阅读、查找、审查和归一任务。
+目标：把“主 agent / 子 agent”的分工边界定义清楚，但阶段 5 不要求所有角色都已经是独立 LLM 会话。阶段 5 先把 Locator、Resolver、Normalizer、Librarian、Arbiter 做成主 agent 可调用的工具、轻量逻辑或已存在 Verifier 这类小范围模型复核，用真实长跑验证触发时机、输入输出和日志价值。等阶段 5 调好后，再在阶段 6 把最值得模型化的工具升级为真正独立 LLM agent。
 
-建议结构：
+阶段 5 的建议结构：
 
 ```text
 Python Runner
   负责进度、文件、工具执行、写入和安全边界。
 
-Quality Coordinator Agent（主 agent）
+Quality Coordinator Agent（主 agent，阶段 5 可先由 Runner / Prompt / 风险门控共同承担）
   负责看 Labeler 的结构化结果和风险信号，决定是否：
   - 接受结果。
   - 调用 Verifier。
@@ -955,28 +955,30 @@ Quality Coordinator Agent（主 agent）
   - 调用 Name Normalizer。
   - 调用 Arbiter。
 
-Labeler Agent（子 agent）
+Labeler Agent（阶段 5 的主标注模型）
   负责当前 batch 的初始 speaker 判断和正证据。
 
-Verifier Agent（子 agent）
+Verifier Agent（阶段 5 已可作为独立模型复核 agent）
   负责找反证、轮次冲突、被称呼者误判和证据不足。
 
-Identity Locator Agent（子 agent）
+Identity Locator Agent（阶段 5 先作为有界查找工具或轻量逻辑）
   粗略查找临时身份后文是否出现姓名或稳定身份。
 
-Identity Resolver Agent（子 agent）
+Identity Resolver Agent（阶段 5 先作为候选范围细读工具或轻量逻辑）
   在 Locator 给出的候选行范围内细读，判断是否真是同一人物。
 
-Name Normalizer / Character Librarian Agent（子 agent）
+Name Normalizer / Character Librarian Agent（阶段 5 先作为轻量角色库工具）
   负责角色显示名归一、轻量角色库更新和重复候选检查。
 
-Arbiter Agent（子 agent）
+Arbiter Agent（阶段 5 先作为冲突裁决工具）
   只在多个 agent 结论冲突时做最终裁决。
 ```
 
 说明：
 
 - 多个 agent 可以使用同一个模型；这通常只增加调用时间，不需要加载多份模型显存。
+- 阶段 5 的“agent”允许先表现为可调用工具、轻量程序逻辑或单一 Verifier 模型会话；这一步的重点是确认触发策略和证据结构是否有效。
+- 真正多个独立 LLM 会话的协作不在阶段 5 里强行完成，单独放到阶段 6。
 - 主 agent 负责调度和裁决流程，不应携带过大的小说上下文。
 - 子 agent 的 prompt 必须单一明确，避免一个 agent 同时承担定位、细读、归一和仲裁。
 - 不做简单多数投票。投票无法解决高度相关错误，必须比较证据和反证。
@@ -1084,11 +1086,66 @@ Identity Resolver Agent
 - 完整 V2 角色卡数据库。
 - 长期 `mystery` 实体追踪。
 - 把所有无名 NPC 都结构化入库。
+- 把 Locator / Resolver / Normalizer / Librarian / Arbiter 全部升级为独立 LLM 会话；这放到阶段 6。
 - GUI 或人工标注平台。
 - 用投票替代证据判断。
 - 在生产代码或 prompt 模板中写入某部小说的角色名、地点、剧情、口癖。
 
 这些能力可以作为更后面的研究方向，但不应阻塞当前目标：在现有整卷长跑 agent loop 上显著提高标注准确率。
+
+### 阶段 6：真正多 LLM Agent 协作
+
+目标：在阶段 5 的风险门控、身份工具、角色库和触发策略稳定后，把已经证明有价值的辅助工具升级为真正独立的 LLM agent 会话。阶段 6 不急于追求“agent 数量”，而是只模型化那些用轻量逻辑无法可靠完成、且在 mismatch attribution 中确实能降低错误的环节。
+
+启动条件：
+
+- 阶段 5 的整卷长跑能稳定完成。
+- `.dialoop/annotations.jsonl` 中能看到 identity、normalizer、arbiter 等工具在合适样本上被触发。
+- mismatch attribution 能说明哪些错误仍然来自身份后置、显示名归一、Verifier false pass 或多结论冲突。
+- 当前工具层的输入输出结构已经足够稳定，可以作为独立 agent 的协议。
+
+建议结构：
+
+```text
+Python Runner
+  负责进度、文件、预算、工具执行、agent 调度和安全边界。
+
+Coordinator Agent
+  只看结构化候选、风险信号和各子 agent 结论，决定下一步。
+
+Labeler Agent
+  负责当前 batch 的初始 speaker、正证据、反证候选和 confidence。
+
+Verifier Agent
+  负责找反证、轮次冲突、被称呼者误判和证据不足。
+
+Identity Locator Agent
+  独立模型会话，负责粗略定位身份后置候选区域。
+
+Identity Resolver Agent
+  独立模型会话，负责细读候选范围并判断是否同一人物。
+
+Name Normalizer / Character Librarian Agent
+  独立模型会话，负责显示名归一、别名维护和角色库去重建议。
+
+Arbiter Agent
+  独立模型会话，只在多方结论冲突时比较证据并裁决。
+```
+
+原则：
+
+- 多个 agent 可以共享同一个模型 endpoint，不要求加载多份模型。
+- 不是每条对话都调用所有 agent；仍由风险门控和触发规则决定。
+- 每个 agent 都必须有单一职责、稳定 JSON 输出和上下文预算。
+- 不做简单投票，必须比较证据、反证和原文行号。
+- 角色库仍是辅助线索，不能覆盖原文证据。
+
+验收：
+
+- 日志能清楚显示某条标注经过了哪些独立 LLM agent。
+- 每个 agent 的输入输出可以单独测试和回放。
+- 与阶段 5 最终版本相比，身份后置、显示名归一和 Verifier false pass 相关错误有可量化下降。
+- 生产逻辑仍不包含具体评测小说的人名、地点、剧情或口癖。
 
 ## 14. 测试策略
 

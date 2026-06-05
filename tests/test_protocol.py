@@ -27,6 +27,12 @@ class ProtocolTest(unittest.TestCase):
         schema = openai_tools_schema()
         self.assertEqual(schema[0]["type"], "function")
         self.assertIn("parameters", schema[0]["function"])
+        locate = next(spec for spec in specs if spec.name == "locate_identity")
+        normalize = next(spec for spec in specs if spec.name == "normalize_speaker")
+        submit = next(spec for spec in specs if spec.name == "submit_labels")
+        self.assertIn("Required before submit_labels", locate.description)
+        self.assertIn("Required before submit_labels", normalize.description)
+        self.assertIn("locate_identity/resolve_identity", submit.description)
 
     def test_submit_labels_schema_can_pin_active_batch_count(self) -> None:
         specs = local_tool_specs(submit_label_count=2)
