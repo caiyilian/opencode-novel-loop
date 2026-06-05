@@ -11,4 +11,6 @@ python -m dialoop.cli novel.txt \
   --model-timeout 360 \
   --model-retries 3 \
   --model-retry-delay 10 \
-  --reset-annotations
+  --reset-annotations \
+  --identity-lookahead-lines 120 \
+  --identity-lookahead-rounds 2
