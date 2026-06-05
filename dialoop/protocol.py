@@ -86,9 +86,9 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
         ToolSpec(
             name="locate_identity",
             description=(
-                "Bounded lookahead helper for temporary speaker identities. "
-                "It scans later novel lines for likely identity introduction ranges and returns candidates only; "
-                "it never changes labels."
+                "Required before submit_labels when a trackable concrete person is only labeled by a temporary "
+                "identity such as girl, boy, old man, man, or woman. It scans later novel lines for bounded "
+                "identity-introduction ranges and returns candidates only; it never changes labels."
             ),
             parameters={
                 "type": "object",
@@ -118,8 +118,9 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
         ToolSpec(
             name="resolve_identity",
             description=(
-                "Read a bounded candidate range and decide whether it contains a stable name for a temporary speaker. "
-                "Returns resolved, not_same_person, or not_enough_evidence style metadata; it never changes labels."
+                "Use immediately after locate_identity returns candidate ranges. Read a bounded candidate range and "
+                "decide whether it contains a stable name for the same temporary speaker. Returns resolved, "
+                "not_same_person, or not_enough_evidence style metadata; it never changes labels."
             ),
             parameters={
                 "type": "object",
@@ -140,8 +141,9 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
         ToolSpec(
             name="record_character",
             description=(
-                "Add or update a lightweight character library entry with evidence-backed aliases and summary. "
-                "This is an auxiliary memory tool and does not overwrite submitted labels."
+                "Add or update a lightweight character library entry after a stable speaker name or alias is "
+                "supported by evidence. Use this before submit_labels when identity lookup resolves a new display "
+                "name. This auxiliary memory tool does not overwrite submitted labels."
             ),
             parameters={
                 "type": "object",
@@ -164,8 +166,9 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
         ToolSpec(
             name="normalize_speaker",
             description=(
-                "Ask the lightweight character library whether a speaker alias should map to an existing display_name. "
-                "Returns a suggestion only; the model must still submit the final speaker explicitly."
+                "Required before submit_labels when the character library is non-empty and the candidate speaker may "
+                "be an alias, short form, or temporary description. Returns a suggestion only; the model must still "
+                "submit the final speaker explicitly."
             ),
             parameters={
                 "type": "object",
@@ -179,8 +182,8 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
         ToolSpec(
             name="arbitrate_identity",
             description=(
-                "Resolve conflicts between Labeler, Verifier, Identity Resolver, and Name Normalizer conclusions. "
-                "Returns a recommendation only; it never writes labels."
+                "Required when Labeler, Verifier, Identity Resolver, and Name Normalizer conclusions conflict. "
+                "Compares the evidence-backed conclusions and returns a recommendation only; it never writes labels."
             ),
             parameters={
                 "type": "object",
@@ -204,6 +207,8 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
                 "Submit one speaker name for each dialogue in the active batch, in order. "
                 'Arguments must use the exact shape {"speakers":["speaker1", "..."]}. '
                 "When possible, include evidence_lines, reason, rejected_candidates, and confidence. "
+                "Do not submit a trackable temporary identity speaker before using locate_identity/resolve_identity. "
+                "Do not submit an alias-like speaker before checking normalize_speaker when known characters exist. "
                 "Do not include labels for previous_dialogues, following_dialogues, or raw context lines."
             ),
             parameters={

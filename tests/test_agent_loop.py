@@ -481,6 +481,9 @@ class AgentLoopTest(unittest.TestCase):
         prompt = system_prompt("auto")
 
         self.assertIn("有限范围内揭示其姓名或稳定称呼", prompt)
+        self.assertIn("必须先调用 locate_identity", prompt)
+        self.assertIn("record_character", prompt)
+        self.assertIn("必须调用 arbitrate_identity", prompt)
         self.assertIn("不要为了无名群体", prompt)
         self.assertIn("非人物发声", prompt)
         self.assertIn("短句、追问、省略号", prompt)
@@ -496,6 +499,9 @@ class AgentLoopTest(unittest.TestCase):
 
         self.assertIn("read_novel(start_line=60, end_line=140)", prompt)
         self.assertIn("必须且只能提交 1 个 speaker", prompt)
+        self.assertIn("身份工具检查", prompt)
+        self.assertIn("必须先调用 locate_identity", prompt)
+        self.assertIn("角色库检查", prompt)
 
     def test_batch_prompt_includes_neighbor_dialogues(self) -> None:
         prompt = batch_prompt(
@@ -566,6 +572,81 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(result.tool_history[0].result["accepted"], False)
             self.assertIn("call read_novel or search_novel", result.tool_history[0].result["error"])
             self.assertIn("automatic_context", result.tool_history[0].result)
+
+    def test_temporary_identity_submit_requires_identity_tool_before_write(self) -> None:
+        text = "\n".join(
+            [
+                "少女说：「救命。」",
+                "她后来跑进森林。",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(text), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="early-temp-submit",
+                                name="submit_labels",
+                                arguments={
+                                    "speakers": ["少女"],
+                                    "evidence_lines": [1],
+                                    "reason": "Only a temporary identity is known.",
+                                    "confidence": "medium",
+                                },
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="locate",
+                                name="locate_identity",
+                                arguments={"speaker": "少女"},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="submit-after-lookup",
+                                name="submit_labels",
+                                arguments={
+                                    "speakers": ["少女"],
+                                    "evidence_lines": [1],
+                                    "reason": "Bounded identity lookup found no stable name, so keep the temporary identity.",
+                                    "confidence": "medium",
+                                },
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=4)).run_one_batch()
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(LabelStore(labels).labels(), ["少女"])
+            self.assertEqual(result.tool_history[1].result["accepted"], False)
+            self.assertIn("temporary identity speaker", result.tool_history[1].result["error"])
+            self.assertIn("locate_identity", result.tool_history[1].result["instruction"])
+            self.assertEqual(result.tool_history[2].name, "locate_identity")
+            self.assertEqual(result.tool_history[3].result["accepted"], True)
 
     def test_repeated_submit_before_context_can_recover_without_looping(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
