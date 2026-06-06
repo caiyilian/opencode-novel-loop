@@ -33,6 +33,8 @@ class ProtocolTest(unittest.TestCase):
         self.assertIn("Required before submit_labels", locate.description)
         self.assertIn("Required before submit_labels", normalize.description)
         self.assertIn("locate_identity/resolve_identity", submit.description)
+        self.assertIn("first-person pronouns", locate.description)
+        self.assertIn("story, play", locate.description)
 
     def test_submit_labels_schema_can_pin_active_batch_count(self) -> None:
         specs = local_tool_specs(submit_label_count=2)
