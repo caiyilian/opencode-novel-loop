@@ -12,11 +12,29 @@ class ProtocolTest(unittest.TestCase):
 
         self.assertEqual(
             names,
-            {"get_next_dialogue", "read_novel", "search_novel", "submit_labels"},
+            {
+                "get_next_dialogue",
+                "read_novel",
+                "search_novel",
+                "locate_identity",
+                "resolve_identity",
+                "record_character",
+                "normalize_speaker",
+                "arbitrate_identity",
+                "submit_labels",
+            },
         )
         schema = openai_tools_schema()
         self.assertEqual(schema[0]["type"], "function")
         self.assertIn("parameters", schema[0]["function"])
+        locate = next(spec for spec in specs if spec.name == "locate_identity")
+        normalize = next(spec for spec in specs if spec.name == "normalize_speaker")
+        submit = next(spec for spec in specs if spec.name == "submit_labels")
+        self.assertIn("Required before submit_labels", locate.description)
+        self.assertIn("Required before submit_labels", normalize.description)
+        self.assertIn("locate_identity/resolve_identity", submit.description)
+        self.assertIn("first-person pronouns", locate.description)
+        self.assertIn("story, play", locate.description)
 
     def test_submit_labels_schema_can_pin_active_batch_count(self) -> None:
         specs = local_tool_specs(submit_label_count=2)
@@ -31,6 +49,12 @@ class ProtocolTest(unittest.TestCase):
 
         self.assertEqual(action.action, "read_novel")
         self.assertEqual(action.args, {"start_line": 1, "end_line": 3})
+
+    def test_parse_json_action_accepts_identity_tools(self) -> None:
+        action = parse_json_action('{"action":"locate_identity","args":{"speaker":"girl"}}')
+
+        self.assertEqual(action.action, "locate_identity")
+        self.assertEqual(action.args, {"speaker": "girl"})
 
     def test_parse_json_action_from_fenced_json(self) -> None:
         action = parse_json_action(

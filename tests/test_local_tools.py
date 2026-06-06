@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from dialoop.identity import extract_stable_names
 from dialoop.local_tools import DialogueIndex, DialoopLocalTools, LabelStore, ToolValidationError
 
 
@@ -199,6 +200,167 @@ class DialoopLocalToolsTest(unittest.TestCase):
             next_dialogue = tools.get_next_dialogue()
 
             self.assertEqual(len(next_dialogue["dialogues"]), 1)
+
+    def test_identity_lookup_resolves_bounded_later_name(self) -> None:
+        text = "\n".join(
+            [
+                "\u5c11\u5973\u8bf4\uff1a\u300cHelp.\u300d",
+                "\u53d9\u8ff0\u3002",
+                "\u5979\u540e\u6765\u8bf4\uff1a\u300c\u6211\u53eb\u963f\u6d1b\u3002\u300d",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(
+                DialogueIndex.from_text(text),
+                LabelStore(labels),
+                identity_lookahead_lines=5,
+            )
+            tools.get_next_dialogue()
+
+            located = tools.locate_identity("\u5c11\u5973")
+            candidate = located["candidates"][0]
+            resolved = tools.resolve_identity(
+                "\u5c11\u5973",
+                start_line=candidate["start_line"],
+                end_line=candidate["end_line"],
+            )
+
+        self.assertEqual(located["search_start_line"], 2)
+        self.assertEqual(candidate["matched_line"], 3)
+        self.assertEqual(candidate["suggested_names"], ["\u963f\u6d1b"])
+        self.assertEqual(resolved["verdict"], "resolved")
+        self.assertEqual(resolved["recommended_speaker"], "\u963f\u6d1b")
+        self.assertEqual(resolved["evidence_lines"], [3])
+
+    def test_identity_lookup_ignores_repeated_temporary_term_without_name_marker(self) -> None:
+        text = "\n".join(
+            [
+                "\u5c11\u5973\u8bf4\uff1a\u300cHelp.\u300d",
+                "\u5c11\u5973\u7f13\u7f13\u5f20\u5f00\u773c\u775b\u3002",
+                "\u5c11\u5973\u7ad9\u4e86\u8d77\u6765\u3002",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(
+                DialogueIndex.from_text(text),
+                LabelStore(labels),
+                identity_lookahead_lines=5,
+            )
+            tools.get_next_dialogue()
+
+            located = tools.locate_identity("\u5c11\u5973")
+
+        self.assertEqual(located["candidates"], [])
+
+    def test_identity_resolver_rejects_unrelated_later_self_introduction(self) -> None:
+        text = "\n".join(
+            [
+                "\u7537\u5b50\u8bf4\uff1a\u300cInteresting.\u300d",
+                "\u4e00\u6bb5\u53d9\u8ff0\u3002",
+                "\u53c8\u4e00\u6bb5\u53d9\u8ff0\u3002",
+                "\u65b0\u7684\u4eba\u9760\u8fd1\u8fc7\u6765\u3002",
+                "\u300c\u5c0f\u7684\u540d\u53eb\u6770\u5ec9\u3002\u300d",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(
+                DialogueIndex.from_text(text),
+                LabelStore(labels),
+                identity_lookahead_lines=8,
+            )
+            tools.get_next_dialogue()
+
+            located = tools.locate_identity("\u7537\u5b50")
+            resolved = tools.resolve_identity(
+                "\u7537\u5b50",
+                start_line=3,
+                end_line=5,
+            )
+
+        self.assertEqual(located["candidates"], [])
+        self.assertEqual(resolved["verdict"], "not_same_person")
+        self.assertIsNone(resolved["recommended_speaker"])
+
+    def test_extract_stable_names_filters_places_and_role_prefixes(self) -> None:
+        self.assertEqual(extract_stable_names("\u6211\u4f4f\u5728\u4e00\u4e2a\u53eb\u505a\u4f69\u8fde\u4f50\u7684\u57ce\u9547\u3002"), [])
+        self.assertEqual(extract_stable_names("\u554a\uff01\u5c0f\u7684\u540d\u53eb\u6770\u5ec9\u3002"), ["\u6770\u5ec9"])
+        self.assertEqual(extract_stable_names("\u6211\u662f\u65c5\u884c\u5546\u4eba\u7f57\u4f26\u65af\u3002"), ["\u7f57\u4f26\u65af"])
+        self.assertEqual(extract_stable_names("\u6211\u662f\u5546\u4eba\u3002"), [])
+
+    def test_character_library_records_and_suggests_normalized_display_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels))
+
+            recorded = tools.record_character(
+                display_name="\u7f57\u4f26\u65af",
+                aliases=["\u65c5\u884c\u5546\u4eba"],
+                summary="merchant",
+                evidence_lines=[10, 10, 11],
+                last_seen_dialogue_index=3,
+                last_seen_line_number=11,
+                confidence="high",
+            )
+            normalized = tools.normalize_speaker("\u65c5\u884c\u5546\u4eba")
+            next_dialogue = tools.get_next_dialogue()
+
+        self.assertEqual(recorded["record"]["display_name"], "\u7f57\u4f26\u65af")
+        self.assertEqual(recorded["record"]["evidence_lines"], [10, 11])
+        self.assertTrue(normalized["matched"])
+        self.assertEqual(normalized["suggested_display_name"], "\u7f57\u4f26\u65af")
+        self.assertEqual(next_dialogue["known_characters"][0]["display_name"], "\u7f57\u4f26\u65af")
+
+    def test_identity_lookup_requires_active_batch_or_dialogue_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels))
+
+            with self.assertRaises(ToolValidationError):
+                tools.locate_identity("\u5c11\u5973")
+
+    def test_identity_lookup_round_limit_prevents_unbounded_search(self) -> None:
+        text = "\n".join(
+            [
+                "\u5c11\u5973\u8bf4\uff1a\u300cHelp.\u300d",
+                "\u5979\u8bf4\uff1a\u300c\u6211\u53eb\u963f\u6d1b\u3002\u300d",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(
+                DialogueIndex.from_text(text),
+                LabelStore(labels),
+                identity_lookahead_rounds=1,
+            )
+            tools.get_next_dialogue()
+
+            first = tools.locate_identity("\u5c11\u5973")
+            second = tools.locate_identity("\u5c11\u5973")
+
+        self.assertFalse(first["round_limit_reached"])
+        self.assertEqual(first["round"], 1)
+        self.assertTrue(second["round_limit_reached"])
+        self.assertEqual(second["round_limit"], 1)
+        self.assertEqual(second["candidates"], [])
+
+    def test_identity_arbiter_prefers_resolved_evidence_backed_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels))
+
+            decision = tools.arbitrate_identity(
+                labeler_speaker="\u5c11\u5973",
+                verifier_verdict="pass",
+                resolver_verdict="resolved",
+                resolver_speaker="\u963f\u6d1b",
+                normalizer_speaker="\u5c11\u5973",
+            )
+
+        self.assertEqual(decision["decision"], "use_resolved_identity")
+        self.assertEqual(decision["recommended_speaker"], "\u963f\u6d1b")
 
 
 if __name__ == "__main__":
