@@ -1095,16 +1095,16 @@ Identity Resolver Agent
 
 ### 阶段 6：真正多 LLM Agent 协作
 
-目标：在阶段 5 的风险门控、身份工具、角色库和触发策略稳定后，把已经证明有价值的辅助工具升级为真正独立的 LLM agent 会话。阶段 6 不急于追求“agent 数量”，而是只模型化那些用轻量逻辑无法可靠完成、且在 mismatch attribution 中确实能降低错误的环节。
+目标：在阶段 5 的风险门控、身份工具、角色库和触发策略验证后，把已经证明需要独立上下文的辅助环节升级为真正独立的 LLM agent 会话。阶段 6 不在单个 issue 中一次性完成，而是拆成多个可独立开发、独立验证、独立合并的子阶段，避免一个阶段 6 分支长期偏离主分支。
 
 启动条件：
 
 - 阶段 5 的整卷长跑能稳定完成。
-- `.dialoop/annotations.jsonl` 中能看到 identity、normalizer、arbiter 等工具在合适样本上被触发。
+- `.dialoop/annotations.jsonl` 中能看到 identity 或 verifier 等辅助工具在合适样本上被触发；如果 normalizer / arbiter 一直没有触发，也应视为阶段 6 调度改造的输入信号，而不是阻塞条件。
 - mismatch attribution 能说明哪些错误仍然来自身份后置、显示名归一、Verifier false pass 或多结论冲突。
 - 当前工具层的输入输出结构已经足够稳定，可以作为独立 agent 的协议。
 
-建议结构：
+整体目标结构：
 
 ```text
 Python Runner
@@ -1140,11 +1140,115 @@ Arbiter Agent
 - 不做简单投票，必须比较证据、反证和原文行号。
 - 角色库仍是辅助线索，不能覆盖原文证据。
 
+#### 阶段 6-1：Coordinator 调度骨架 + 子 agent 协议
+
+目标：先把“谁决定调用哪个 agent、每个 agent 输入输出是什么、日志如何记录”做成稳定骨架，不急着把所有子 agent 都实现完整能力。
+
+内容：
+
+- 新增 Coordinator 层，放在 Python Runner 与各子 agent 之间。
+- 定义统一 agent result schema，例如：
+
+```json
+{
+  "agent": "labeler|verifier|identity_locator|identity_resolver|normalizer|arbiter",
+  "verdict": "accept|reject|uncertain|resolved|not_same_person|not_enough_evidence",
+  "recommended_speaker": "可选",
+  "evidence_lines": [123],
+  "counter_evidence_lines": [],
+  "reason": "简短说明",
+  "confidence": "high|medium|low"
+}
+```
+
+- Coordinator 根据 risk signals、Verifier 结果、identity lookup 结果和 mismatch 类型决定下一步，而不是依赖主 agent 自觉调用工具。
+- 每个子 agent 有独立 prompt 构造函数和独立上下文预算。
+- `.dialoop/annotations.jsonl` 中增加 coordinator trace，记录某条标注经过了哪些 agent、为什么调用、为什么接受或拒绝。
+- 先用 fake model / deterministic stub 覆盖调度分支，不要求阶段 6-1 就显著提升准确率。
+
+验收：
+
+- 单元测试能证明 Coordinator 会按风险信号调用正确子 agent。
+- annotations 能记录 coordinator trace。
+- 现有长跑流程仍能完成，`labeled.txt` 输出格式不变。
+- 不把具体评测小说的人名、地点、剧情或口癖写进生产逻辑。
+
+#### 阶段 6-2：独立 Verifier + Arbiter 闭环
+
+目标：优先处理阶段 5 mismatch attribution 中数量最大的 `high_risk_verifier_pass` 和 `high_confidence_wrong`，让 Verifier 不再只是被动复核，而是能与 Labeler 结论形成可裁决的闭环。
+
+内容：
+
+- Verifier 使用独立模型会话和独立 prompt，只负责找反证、轮次冲突、被称呼者误判和证据不足。
+- Verifier 输出必须包含 `verdict / counter_evidence_lines / reason / confidence`。
+- 当 Labeler 与 Verifier 冲突时，Coordinator 调用 Arbiter。
+- Arbiter 只比较结构化证据和反证，不重新长篇阅读全局上下文。
+- Verifier false pass 样本要能进入回归测试或至少进入可复查报告。
+
+验收：
+
+- `high_risk_verifier_pass` 数量相对阶段 5-4 基线下降。
+- 被 Verifier 否决的样本不会直接写入 `labeled.txt`。
+- Arbiter 的裁决原因写入 annotations。
+
+#### 阶段 6-3：独立 Identity Locator / Resolver
+
+目标：把阶段 5-4 的身份后置工具升级为独立上下文的模型子 agent，解决主 agent 上下文有限、误触发和候选解释能力弱的问题。
+
+内容：
+
+- Identity Locator 独立读取有限后文，只负责找候选身份揭示区域。
+- Identity Resolver 独立细读候选范围，判断是否同一人物。
+- Coordinator 负责决定什么时候触发 identity 流程，避免把代词、口癖、故事内部人物和普通群体送入 identity lookup。
+- 保留有界查找参数，例如 `--identity-lookahead-lines`、`--identity-lookahead-rounds`。
+- identity 子 agent 输出必须包含候选范围、同一人物判断、推荐 speaker 和证据行。
+
+验收：
+
+- 身份后置样本能稳定给出“在哪些行找到身份、为什么是同一人”。
+- `男子 / 咱 / 戏曲故事里的男孩` 这类误触发不回归。
+- identity 相关错误相对阶段 5-4 基线下降。
+
+#### 阶段 6-4：Name Normalizer + Character Librarian
+
+目标：让角色显示名归一和轻量角色库更新脱离主 agent 自觉调用，改为 Coordinator 驱动的独立子 agent 或确定性工具链。
+
+内容：
+
+- Character Librarian 维护轻量角色库，只记录当前文本证据支持的 display_name、aliases、summary、evidence_lines、last_seen 和 confidence。
+- Name Normalizer 根据 Labeler speaker、证据和角色库候选判断是否应映射到已有 display_name。
+- 新增或更新角色库时必须保存证据行。
+- 角色库只能辅助归一，不能覆盖原文强证据。
+- 对疑似重复角色条目输出冲突建议，必要时交给 Arbiter。
+
+验收：
+
+- annotations 中能看到 record/normalize 的触发原因和结果。
+- 同一重要角色显示名更稳定。
+- 无名低重要度人物不会被过度合并。
+
+#### 阶段 6-5：整合回归与阶段 6 收敛
+
+目标：把阶段 6 各子 agent 的收益用统一评估证明，决定是否进入更大规模角色记忆或人工复核系统。
+
+内容：
+
+- 固定阶段 5-4 作为对照基线。
+- 每个阶段 6 子阶段都运行相同的 evaluate、mismatch-attribution、专有词扫描。
+- 报告按错误类型比较变化：
+  - `high_risk_verifier_pass`
+  - `medium_or_lower_risk_no_verifier`
+  - `adjacent_turn_order`
+  - `same_line_multiple_dialogues`
+  - `high_confidence_wrong`
+  - identity / normalization 相关错误
+- 记录 token/调用次数/失败率，避免质量提升完全靠不可控成本堆出来。
+
 验收：
 
 - 日志能清楚显示某条标注经过了哪些独立 LLM agent。
 - 每个 agent 的输入输出可以单独测试和回放。
-- 与阶段 5 最终版本相比，身份后置、显示名归一和 Verifier false pass 相关错误有可量化下降。
+- 与阶段 5-4 最终版本相比，身份后置、显示名归一和 Verifier false pass 相关错误有可量化下降。
 - 生产逻辑仍不包含具体评测小说的人名、地点、剧情或口癖。
 
 ## 14. 测试策略
