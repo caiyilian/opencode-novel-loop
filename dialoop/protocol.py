@@ -87,8 +87,10 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
             name="locate_identity",
             description=(
                 "Required before submit_labels when a trackable concrete person is only labeled by a temporary "
-                "identity such as girl, boy, old man, man, or woman. It scans later novel lines for bounded "
-                "identity-introduction ranges and returns candidates only; it never changes labels."
+                "identity such as a girl, young person, or old person. It scans later novel lines for bounded "
+                "identity-introduction ranges and returns candidates only; it never changes labels. Do not use "
+                "for first-person pronouns or verbal quirks such as 我/咱, and do not use for characters inside a "
+                "story, play, rumor, or quoted example narrated by the real speaker."
             ),
             parameters={
                 "type": "object",
@@ -120,7 +122,8 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
             description=(
                 "Use immediately after locate_identity returns candidate ranges. Read a bounded candidate range and "
                 "decide whether it contains a stable name for the same temporary speaker. Returns resolved, "
-                "not_same_person, or not_enough_evidence style metadata; it never changes labels."
+                "not_same_person, or not_enough_evidence style metadata; it never changes labels. A place, "
+                "organization, or story-internal character is not a resolved speaker identity."
             ),
             parameters={
                 "type": "object",

@@ -484,6 +484,8 @@ class AgentLoopTest(unittest.TestCase):
         self.assertIn("必须先调用 locate_identity", prompt)
         self.assertIn("record_character", prompt)
         self.assertIn("必须调用 arbitrate_identity", prompt)
+        self.assertIn("不要把“我”“咱”“汝”“你”“您”等代词", prompt)
+        self.assertIn("讲故事、转述戏曲", prompt)
         self.assertIn("不要为了无名群体", prompt)
         self.assertIn("非人物发声", prompt)
         self.assertIn("短句、追问、省略号", prompt)
@@ -502,6 +504,7 @@ class AgentLoopTest(unittest.TestCase):
         self.assertIn("身份工具检查", prompt)
         self.assertIn("必须先调用 locate_identity", prompt)
         self.assertIn("角色库检查", prompt)
+        self.assertIn("故事、戏曲、传闻", prompt)
 
     def test_batch_prompt_includes_neighbor_dialogues(self) -> None:
         prompt = batch_prompt(

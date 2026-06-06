@@ -11,20 +11,80 @@ DEFAULT_LOOKAHEAD_LINES = 120
 DEFAULT_LOOKAHEAD_ROUNDS = 2
 IDENTITY_MARKERS = (
     "\u6211\u53eb",
+    "\u6211\u53eb\u505a",
+    "\u6211\u53eb\u4f5c",
+    "\u5c0f\u7684\u540d\u53eb",
     "\u540d\u53eb",
     "\u540d\u5b57\u53eb",
     "\u540d\u5b57\u662f",
-    "\u53eb\u4f5c",
-    "\u53eb\u505a",
     "\u6211\u662f",
 )
 NAME_CHARS = r"[\u4e00-\u9fffA-Za-z0-9\u00b7\u2022\u30fb\uff0e\.]{1,20}"
 NAME_PATTERNS = (
-    re.compile(r"(?:\u6211\u53eb|\u540d\u53eb|\u540d\u5b57\u53eb|\u540d\u5b57\u662f|\u53eb\u4f5c|\u53eb\u505a)(" + NAME_CHARS + ")"),
-    re.compile(r"\u6211\u662f(" + NAME_CHARS + ")"),
+    re.compile(
+        r"(?:"
+        r"\u6211\u53eb\u505a|\u6211\u53eb\u4f5c|\u6211\u53eb|"
+        r"\u5c0f\u7684\u540d\u53eb|\u5c0f\u7684\u53eb\u505a|\u5c0f\u7684\u53eb\u4f5c|\u5c0f\u7684\u53eb|"
+        r"\u5728\u4e0b\u540d\u53eb|\u5728\u4e0b\u53eb|\u672c\u4eba\u540d\u53eb|\u672c\u4eba\u53eb|"
+        r"\u4ed6\u53eb|\u5979\u53eb|\u540d\u53eb|\u540d\u5b57\u53eb|\u540d\u5b57\u662f"
+        r")("
+        + NAME_CHARS
+        + r")"
+    ),
+    re.compile(r"(?:\u6211\u662f|\u5c0f\u7684\u662f|\u5728\u4e0b\u662f|\u672c\u4eba\u662f)(" + NAME_CHARS + ")"),
 )
 NAME_TRAILING_PUNCTUATION = set(".,!?;: \t\r\n")
 NAME_TRAILING_PUNCTUATION.update("\uff0c\u3002\uff01\uff1f\uff1b\uff1a\u3001\u201c\u201d\u2018\u2019")
+NON_PERSON_NAME_FRAGMENTS = (
+    "\u57ce\u9547",
+    "\u57ce\u5e02",
+    "\u6751\u843d",
+    "\u6751\u5b50",
+    "\u5730\u65b9",
+    "\u6559\u4f1a",
+    "\u4fee\u9053\u9662",
+    "\u5546\u884c",
+)
+PERSON_ROLE_PREFIXES = (
+    "\u65c5\u884c\u5546\u4eba",
+    "\u521a\u5165\u884c\u7684\u65c5\u884c\u5546\u4eba",
+    "\u65b0\u624b\u65c5\u884c\u5546\u4eba",
+    "\u5546\u4eba",
+    "\u884c\u5546",
+    "\u9886\u4e3b",
+    "\u9a91\u58eb",
+    "\u8001\u677f",
+)
+RANGE_CONTINUITY_TERMS = {
+    "\u5c11\u5973",
+    "\u5973\u5b69",
+    "\u59d1\u5a18",
+    "\u5c11\u5e74",
+    "\u7537\u5b69",
+    "\u5b69\u5b50",
+    "\u5c0f\u5b69",
+    "\u8001\u4eba",
+    "\u8001\u8005",
+    "\u7537\u4eba",
+    "\u7537\u5b50",
+    "\u5973\u4eba",
+    "\u5973\u5b50",
+    "\u9752\u5e74",
+    "\u5e74\u8f7b\u4eba",
+    "\u5c0f\u7684",
+    "\u54b1",
+}
+STRICT_MATCH_IDENTITY_TERMS = {
+    "\u7537\u5b69",
+    "\u5b69\u5b50",
+    "\u5c0f\u5b69",
+    "\u7537\u4eba",
+    "\u7537\u5b50",
+    "\u5973\u4eba",
+    "\u5973\u5b50",
+    "\u9752\u5e74",
+    "\u5e74\u8f7b\u4eba",
+}
 
 
 class IdentityValidationError(ValueError):
@@ -197,13 +257,14 @@ class IdentityLocatorAgent:
         for line_number in range(start_line, end_line + 1):
             line = self.dialogue_index.lines[line_number - 1]
             names = extract_stable_names(line)
+            if not names:
+                continue
+            if cleaned_speaker in STRICT_MATCH_IDENTITY_TERMS and cleaned_speaker not in line:
+                continue
             reasons: list[str] = []
             if cleaned_speaker in line:
                 reasons.append("matched speaker term")
-            if names:
-                reasons.append("matched identity marker")
-            if not reasons:
-                continue
+            reasons.append("matched identity marker")
             candidates.append(
                 IdentityCandidate(
                     start_line=max(1, line_number - 2),
@@ -257,9 +318,23 @@ class IdentityResolverAgent:
                 "reason": "candidate range is outside the novel",
             }
 
+        candidate_lines = [
+            (line_number, self.dialogue_index.lines[line_number - 1])
+            for line_number in range(bounded_start, bounded_end + 1)
+        ]
+        if cleaned_speaker in RANGE_CONTINUITY_TERMS and not any(
+            cleaned_speaker in line for _, line in candidate_lines
+        ):
+            return {
+                "speaker": cleaned_speaker,
+                "verdict": "not_same_person",
+                "recommended_speaker": None,
+                "evidence_lines": [],
+                "reason": "candidate range has an identity marker but does not mention the temporary speaker term",
+            }
+
         names_by_line: list[tuple[int, str]] = []
-        for line_number in range(bounded_start, bounded_end + 1):
-            line = self.dialogue_index.lines[line_number - 1]
+        for line_number, line in candidate_lines:
             for name in extract_stable_names(line):
                 names_by_line.append((line_number, name))
         if not names_by_line:
@@ -349,7 +424,17 @@ def extract_stable_names(text: str) -> list[str]:
 
 
 def _clean_name(name: str) -> str:
-    return name.strip().strip("".join(NAME_TRAILING_PUNCTUATION))
+    cleaned = name.strip().strip("".join(NAME_TRAILING_PUNCTUATION))
+    if not cleaned:
+        return ""
+    if any(fragment in cleaned for fragment in NON_PERSON_NAME_FRAGMENTS):
+        return ""
+    for prefix in PERSON_ROLE_PREFIXES:
+        if cleaned == prefix:
+            return ""
+        if cleaned.startswith(prefix) and len(cleaned) > len(prefix):
+            return cleaned[len(prefix) :].strip().strip("".join(NAME_TRAILING_PUNCTUATION))
+    return cleaned
 
 
 def _required_name(value: str, field: str) -> str:
