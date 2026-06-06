@@ -26,6 +26,17 @@ SUBMIT_LABEL_ALIASES = (
     "names",
     "name",
 )
+IDENTITY_LOOKUP_TOOL_NAMES = frozenset({"locate_identity", "resolve_identity"})
+TEMPORARY_IDENTITY_SPEAKERS = frozenset(
+    {
+        "少女",
+        "女孩",
+        "姑娘",
+        "少年",
+        "老人",
+        "老者",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +46,7 @@ class AgentLoopConfig:
     context_window_lines: int = 80
     temperature: float = 0.0
     require_context_before_submit: bool = True
+    require_identity_tool_for_temporary_speaker: bool = True
     verifier_mode: str = "off"
     verifier_temperature: float = 0.0
     verifier_max_tokens: int = 1200
@@ -96,6 +108,12 @@ def system_prompt(protocol: str) -> str:
         "如果没有姓名但上下文有身份或群体，请用中文身份词，例如：村民、骑士、店员、商人、众人、未知。"
         "不要用临时行为关系替代更稳定身份；例如上下文说明是村落居民时，用“村民”而不是“顾客”。"
         "如果当前上下文只给出“女孩”“少年”“老人”等临时描述，但这是一个可追踪的具体人物，且后文在有限范围内揭示其姓名或稳定称呼，请使用后文揭示的姓名或稳定称呼。"
+        "身份工具触发规则是强规则：遇到少女、女孩、姑娘、少年、老人、老者这类可追踪具体人物的临时身份词时，不要直接 submit_labels，必须先调用 locate_identity 查找后文候选区域；如果返回候选，再调用 resolve_identity 细读候选区域。"
+        "如果 resolve_identity 得到稳定姓名或称呼，使用该结果作为候选 speaker，并用 record_character 记录显示名、别名和证据；如果有界查找没有证据，可以保留临时身份词，但必须在 reason 里说明查找结果。"
+        "如果已有角色库条目，提交前凡是 speaker 可能是别名、简称或临时称呼，必须调用 normalize_speaker 获取显示名归一建议；该建议只辅助判断，不能自动覆盖原文证据或 submit_labels 的最终 speaker。"
+        "当 Labeler、Verifier、Identity Resolver 或 Normalizer 结论冲突时，必须调用 arbitrate_identity 获取裁决建议；最终仍必须用 submit_labels 明确提交。"
+        "不要把“我”“咱”“汝”“你”“您”等代词或口癖当成身份后置词；如果上下文已经能判断这是某个已知角色的自称，直接用该角色名，不要对代词调用 locate_identity。"
+        "如果当前引号内容是在某个角色讲故事、转述戏曲、举例或复述别人说过的话，speaker 应该是外层正在讲述的角色，不要把故事内部的男孩、恶魔、商人等人物当成当前真实说话人。"
         "不要为了无名群体、路人或临时职能角色无限寻找姓名；只有具体人物明显会继续参与场景时，才进行有限的后文确认。"
         "如果引号内容明显不是人物说话，而是叙述中的环境声、物体声音、心理比喻声或声音效果，请标注为“非人物发声”；如果文本明确说明某个角色发出该声音，如喊叫、叹息、笑声或嚎叫，仍标注该角色。"
         "短句、追问、省略号、沉默或半句话要重点参考相邻对话和最近已标注结果；不要机械沿用上一句说话人。"
@@ -150,11 +168,24 @@ def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str
         )
         for dialogue in following_dialogues:
             lines.append(f"- index={dialogue['index']} 行号={dialogue['line_number']} 文本={dialogue['text']}")
+    known_characters = batch_result.get("known_characters", [])
+    if known_characters:
+        lines.extend(["", "轻量角色库（仅作显示名/别名线索，不可替代原文证据）："])
+        for character in known_characters:
+            aliases = ", ".join(character.get("aliases", [])) or "none"
+            lines.append(
+                f"- {character.get('display_name')} aliases={aliases} "
+                f"confidence={character.get('confidence')} last_seen={character.get('last_seen_dialogue_index')}"
+            )
     lines.extend(
         [
             "",
             f"第一步请调用 read_novel(start_line={context_start}, end_line={context_end}) 读取上下文。",
             "根据上下文判断说话人；如果遇到可追踪具体人物的身份后置介绍，可以有限读取后文确认姓名或稳定称呼。",
+            "身份工具检查：如果候选 speaker 是少女、女孩、姑娘、少年、老人、老者等临时身份词，且像是会继续参与场景的具体人物，必须先调用 locate_identity；有候选范围时继续调用 resolve_identity。",
+            "角色库检查：如果已知角色库非空，且候选 speaker 可能是别名、简称或临时称呼，提交前必须调用 normalize_speaker；解析出新稳定姓名时调用 record_character 记录证据。",
+            "冲突检查：如果 Labeler、Verifier、Identity Resolver 或 Normalizer 结论不一致，必须调用 arbitrate_identity 后再提交。",
+            "排除项：不要对“我/咱/汝/你/您”等代词或口癖做身份后置查找；不要把故事、戏曲、传闻里的内部人物当成当前引号的真实 speaker。",
             "对很短的追问、沉默、省略号或半句话，务必结合前后相邻对话轮次和最近已标注 speaker 判断。",
             "如果需要更多线索，再调用 read_novel 或 search_novel；不要为了普通无名群体无限查找姓名。",
             (
@@ -192,9 +223,11 @@ class AgentRunner:
             )
         )
         self._used_context_tool = False
+        self._used_identity_lookup_tool = False
 
     def run_one_batch(self) -> AgentBatchResult:
         self._used_context_tool = False
+        self._used_identity_lookup_tool = False
         initial_batch = self.tools.get_next_dialogue()
         if initial_batch["done"]:
             return AgentBatchResult(
@@ -376,6 +409,41 @@ class AgentRunner:
                     keyword=required_str(args, "keyword"),
                     limit=optional_int(args, "limit"),
                 )
+            elif name == "locate_identity":
+                result = self.tools.locate_identity(
+                    speaker=required_str(args, "speaker"),
+                    dialogue_index=optional_int(args, "dialogue_index"),
+                    search_after_line=optional_int(args, "search_after_line"),
+                    lookahead_lines=optional_int(args, "lookahead_lines"),
+                    max_candidates=optional_int(args, "max_candidates") or 3,
+                )
+            elif name == "resolve_identity":
+                result = self.tools.resolve_identity(
+                    speaker=required_str(args, "speaker"),
+                    start_line=required_int(args, "start_line"),
+                    end_line=required_int(args, "end_line"),
+                    dialogue_index=optional_int(args, "dialogue_index"),
+                )
+            elif name == "record_character":
+                result = self.tools.record_character(
+                    display_name=required_str(args, "display_name"),
+                    aliases=optional_str_list(args, "aliases"),
+                    summary=optional_str(args, "summary") or "",
+                    evidence_lines=optional_int_list(args, "evidence_lines"),
+                    last_seen_dialogue_index=optional_int(args, "last_seen_dialogue_index"),
+                    last_seen_line_number=optional_int(args, "last_seen_line_number"),
+                    confidence=optional_str(args, "confidence") or "medium",
+                )
+            elif name == "normalize_speaker":
+                result = self.tools.normalize_speaker(speaker=required_str(args, "speaker"))
+            elif name == "arbitrate_identity":
+                result = self.tools.arbitrate_identity(
+                    labeler_speaker=required_str(args, "labeler_speaker"),
+                    verifier_verdict=optional_str(args, "verifier_verdict"),
+                    resolver_verdict=optional_str(args, "resolver_verdict"),
+                    resolver_speaker=optional_str(args, "resolver_speaker"),
+                    normalizer_speaker=optional_str(args, "normalizer_speaker"),
+                )
             elif name == "submit_labels":
                 result = self._execute_submit_labels(args)
             else:
@@ -387,8 +455,10 @@ class AgentRunner:
         except ToolValidationError as error:
             result = {"accepted": False, "error": str(error)}
 
-        if name in {"read_novel", "search_novel"} and "error" not in result:
+        if name in {"read_novel", "search_novel", "locate_identity", "resolve_identity"} and "error" not in result:
             self._used_context_tool = True
+        if name in IDENTITY_LOOKUP_TOOL_NAMES and "error" not in result:
+            self._used_identity_lookup_tool = True
 
         return ToolExecution(name=name, result=result, arguments=dict(args))
 
@@ -479,6 +549,13 @@ class AgentRunner:
         if self.config.require_context_before_submit and not self._used_context_tool:
             return self._reject_premature_submit_with_context()
         result = self.tools.validate_labels(speakers=speakers)
+        if (
+            self.config.require_identity_tool_for_temporary_speaker
+            and not self._used_identity_lookup_tool
+        ):
+            temporary_speakers = temporary_identity_speakers(result["speakers"])
+            if temporary_speakers:
+                return reject_temporary_identity_submit(temporary_speakers)
         result["pending_review"] = True
         return result
 
@@ -493,6 +570,31 @@ class AgentRunner:
             ),
             "automatic_context": context,
         }
+
+
+def temporary_identity_speakers(speakers: list[str]) -> list[str]:
+    result = []
+    for speaker in speakers:
+        cleaned = speaker.strip()
+        if cleaned in TEMPORARY_IDENTITY_SPEAKERS:
+            result.append(cleaned)
+    return result
+
+
+def reject_temporary_identity_submit(temporary_speakers: list[str]) -> dict[str, Any]:
+    return {
+        "accepted": False,
+        "error": "temporary identity speaker submitted without identity tool lookup",
+        "temporary_speakers": temporary_speakers,
+        "identity_tools_required": ["locate_identity", "resolve_identity"],
+        "instruction": (
+            "Before submitting a trackable temporary identity speaker, call locate_identity for that speaker. "
+            "If locate_identity returns candidates, call resolve_identity on the best candidate range. "
+            "If a stable identity is resolved, submit that speaker and consider record_character. "
+            "If the bounded lookup finds no evidence or reaches its limit, submit the temporary identity with "
+            "evidence_lines, reason, rejected_candidates, and confidence."
+        ),
+    }
 
 
 def format_tool_result(result: dict[str, Any]) -> str:
@@ -520,6 +622,11 @@ def summarize_tool_history(history: list[ToolExecution]) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "read_novel": [],
         "search_novel": [],
+        "locate_identity": [],
+        "resolve_identity": [],
+        "record_character": [],
+        "normalize_speaker": [],
+        "arbitrate_identity": [],
         "submit_labels": [],
     }
 
@@ -541,6 +648,59 @@ def summarize_tool_history(history: list[ToolExecution]) -> dict[str, Any]:
                     "limit": execution.arguments.get("limit"),
                     "total_matches": execution.result.get("total_matches"),
                     "truncated": execution.result.get("truncated", False),
+                }
+            )
+        elif execution.name == "locate_identity":
+            summary["locate_identity"].append(
+                {
+                    "speaker": execution.arguments.get("speaker"),
+                    "dialogue_index": execution.arguments.get("dialogue_index"),
+                    "search_start_line": execution.result.get("search_start_line"),
+                    "search_end_line": execution.result.get("search_end_line"),
+                    "round": execution.result.get("round"),
+                    "round_limit": execution.result.get("round_limit"),
+                    "round_limit_reached": execution.result.get("round_limit_reached", False),
+                    "candidate_count": len(execution.result.get("candidates", []))
+                    if isinstance(execution.result.get("candidates"), list)
+                    else 0,
+                }
+            )
+        elif execution.name == "resolve_identity":
+            summary["resolve_identity"].append(
+                {
+                    "speaker": execution.arguments.get("speaker"),
+                    "start_line": execution.arguments.get("start_line"),
+                    "end_line": execution.arguments.get("end_line"),
+                    "verdict": execution.result.get("verdict"),
+                    "recommended_speaker": execution.result.get("recommended_speaker"),
+                    "evidence_lines": execution.result.get("evidence_lines"),
+                }
+            )
+        elif execution.name == "record_character":
+            record = execution.result.get("record") if isinstance(execution.result.get("record"), dict) else {}
+            summary["record_character"].append(
+                {
+                    "display_name": record.get("display_name"),
+                    "aliases": record.get("aliases"),
+                    "confidence": record.get("confidence"),
+                }
+            )
+        elif execution.name == "normalize_speaker":
+            summary["normalize_speaker"].append(
+                {
+                    "speaker": execution.arguments.get("speaker"),
+                    "suggested_display_name": execution.result.get("suggested_display_name"),
+                    "matched": execution.result.get("matched"),
+                    "confidence": execution.result.get("confidence"),
+                }
+            )
+        elif execution.name == "arbitrate_identity":
+            summary["arbitrate_identity"].append(
+                {
+                    "labeler_speaker": execution.arguments.get("labeler_speaker"),
+                    "decision": execution.result.get("decision"),
+                    "recommended_speaker": execution.result.get("recommended_speaker"),
+                    "reason": execution.result.get("reason"),
                 }
             )
         elif execution.name == "submit_labels":
@@ -659,10 +819,31 @@ def required_str(args: dict[str, Any], name: str) -> str:
     return value
 
 
+def optional_str(args: dict[str, Any], name: str) -> Optional[str]:
+    if name not in args or args[name] is None:
+        return None
+    return required_str(args, name)
+
+
 def required_str_list(args: dict[str, Any], name: str) -> list[str]:
     value = args[name]
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ToolValidationError(f"{name} must be a list of strings")
+    return value
+
+
+def optional_str_list(args: dict[str, Any], name: str) -> Optional[list[str]]:
+    if name not in args or args[name] is None:
+        return None
+    return required_str_list(args, name)
+
+
+def optional_int_list(args: dict[str, Any], name: str) -> Optional[list[int]]:
+    if name not in args or args[name] is None:
+        return None
+    value = args[name]
+    if not isinstance(value, list) or any(type(item) is not int for item in value):
+        raise ToolValidationError(f"{name} must be a list of integers")
     return value
 
 

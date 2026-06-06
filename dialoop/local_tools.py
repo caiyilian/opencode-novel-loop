@@ -5,6 +5,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from .identity import (
+    DEFAULT_LOOKAHEAD_LINES,
+    DEFAULT_LOOKAHEAD_ROUNDS,
+    CharacterLibrary,
+    IdentityArbiterAgent,
+    IdentityLocatorAgent,
+    IdentityResolverAgent,
+    IdentityValidationError,
+)
+
 
 DIALOGUE_PATTERN = re.compile(r"「([^」]+)」")
 
@@ -234,6 +244,9 @@ class DialoopLocalTools:
         search_limit: int = 20,
         previous_context_dialogues: int = 8,
         following_context_dialogues: int = 8,
+        identity_lookahead_lines: int = DEFAULT_LOOKAHEAD_LINES,
+        identity_lookahead_rounds: int = DEFAULT_LOOKAHEAD_ROUNDS,
+        character_library: Optional[CharacterLibrary] = None,
     ):
         if batch_size <= 0:
             raise ToolValidationError("batch_size must be greater than 0")
@@ -243,6 +256,10 @@ class DialoopLocalTools:
             raise ToolValidationError("previous_context_dialogues must be 0 or greater")
         if following_context_dialogues < 0:
             raise ToolValidationError("following_context_dialogues must be 0 or greater")
+        if identity_lookahead_lines <= 0:
+            raise ToolValidationError("identity_lookahead_lines must be greater than 0")
+        if identity_lookahead_rounds < 0:
+            raise ToolValidationError("identity_lookahead_rounds must be 0 or greater")
         self.dialogue_index = dialogue_index
         self.label_store = label_store
         self.batch_size = batch_size
@@ -251,7 +268,14 @@ class DialoopLocalTools:
         self.search_limit = search_limit
         self.previous_context_dialogues = previous_context_dialogues
         self.following_context_dialogues = following_context_dialogues
+        self.identity_lookahead_lines = identity_lookahead_lines
+        self.identity_lookahead_rounds = identity_lookahead_rounds
+        self.character_library = character_library or CharacterLibrary()
+        self.identity_locator = IdentityLocatorAgent(dialogue_index)
+        self.identity_resolver = IdentityResolverAgent(dialogue_index)
+        self.identity_arbiter = IdentityArbiterAgent()
         self._active_batch: list[Dialogue] = []
+        self._identity_lookup_counts: dict[str, int] = {}
 
     @property
     def active_batch_size(self) -> int:
@@ -268,6 +292,8 @@ class DialoopLocalTools:
         search_limit: int = 20,
         previous_context_dialogues: int = 8,
         following_context_dialogues: int = 8,
+        identity_lookahead_lines: int = DEFAULT_LOOKAHEAD_LINES,
+        identity_lookahead_rounds: int = DEFAULT_LOOKAHEAD_ROUNDS,
     ) -> "DialoopLocalTools":
         return cls(
             dialogue_index=DialogueIndex.from_file(novel_path),
@@ -278,6 +304,8 @@ class DialoopLocalTools:
             search_limit=search_limit,
             previous_context_dialogues=previous_context_dialogues,
             following_context_dialogues=following_context_dialogues,
+            identity_lookahead_lines=identity_lookahead_lines,
+            identity_lookahead_rounds=identity_lookahead_rounds,
         )
 
     def get_progress(self) -> dict[str, Any]:
@@ -308,6 +336,7 @@ class DialoopLocalTools:
             "following_dialogues": self._following_unlabeled_dialogues(
                 start_index=progress["labeled"] + len(batch),
             ),
+            "known_characters": self.character_library.to_list(),
         }
 
     def _previous_labeled_dialogues(self, labeled_count: int, labels: list[str]) -> list[dict[str, Any]]:
@@ -348,10 +377,132 @@ class DialoopLocalTools:
     def search_novel(self, keyword: str, limit: Optional[int] = None) -> dict[str, Any]:
         return self.dialogue_index.search(keyword=keyword, limit=limit or self.search_limit)
 
+    def locate_identity(
+        self,
+        speaker: str,
+        dialogue_index: Optional[int] = None,
+        search_after_line: Optional[int] = None,
+        lookahead_lines: Optional[int] = None,
+        max_candidates: int = 3,
+    ) -> dict[str, Any]:
+        dialogue = self._active_or_indexed_dialogue(dialogue_index)
+        lookup_key = f"{dialogue.index}:{speaker.strip()}"
+        lookup_count = self._identity_lookup_counts.get(lookup_key, 0)
+        search_start = max(dialogue.line_number + 1, search_after_line or dialogue.line_number + 1)
+        search_end = min(
+            len(self.dialogue_index.lines),
+            search_start + (lookahead_lines or self.identity_lookahead_lines) - 1,
+        )
+        if lookup_count >= self.identity_lookahead_rounds:
+            return {
+                "speaker": speaker.strip(),
+                "current_line": dialogue.line_number,
+                "search_start_line": search_start,
+                "search_end_line": search_end,
+                "lookahead_lines": lookahead_lines or self.identity_lookahead_lines,
+                "round": lookup_count,
+                "round_limit": self.identity_lookahead_rounds,
+                "round_limit_reached": True,
+                "candidates": [],
+                "suggest_continue": False,
+                "reason": "identity lookahead round limit reached",
+            }
+        self._identity_lookup_counts[lookup_key] = lookup_count + 1
+        try:
+            result = self.identity_locator.locate(
+                speaker=speaker,
+                current_line=dialogue.line_number,
+                search_after_line=search_after_line,
+                lookahead_lines=lookahead_lines or self.identity_lookahead_lines,
+                max_candidates=max_candidates,
+            )
+        except IdentityValidationError as error:
+            raise ToolValidationError(str(error)) from error
+        result["round"] = lookup_count + 1
+        result["round_limit"] = self.identity_lookahead_rounds
+        result["round_limit_reached"] = False
+        return result
+
+    def resolve_identity(
+        self,
+        speaker: str,
+        start_line: int,
+        end_line: int,
+        dialogue_index: Optional[int] = None,
+    ) -> dict[str, Any]:
+        dialogue = self._active_or_indexed_dialogue(dialogue_index)
+        try:
+            return self.identity_resolver.resolve(
+                speaker=speaker,
+                start_line=start_line,
+                end_line=end_line,
+                current_dialogue=dialogue,
+            )
+        except IdentityValidationError as error:
+            raise ToolValidationError(str(error)) from error
+
+    def record_character(
+        self,
+        display_name: str,
+        aliases: Optional[list[str]] = None,
+        summary: str = "",
+        evidence_lines: Optional[list[int]] = None,
+        last_seen_dialogue_index: Optional[int] = None,
+        last_seen_line_number: Optional[int] = None,
+        confidence: str = "medium",
+    ) -> dict[str, Any]:
+        try:
+            record = self.character_library.add_or_update(
+                display_name=display_name,
+                aliases=aliases,
+                summary=summary,
+                evidence_lines=evidence_lines,
+                last_seen_dialogue_index=last_seen_dialogue_index,
+                last_seen_line_number=last_seen_line_number,
+                confidence=confidence,
+            )
+        except IdentityValidationError as error:
+            raise ToolValidationError(str(error)) from error
+        return {"record": record.to_dict(), "known_characters": self.character_library.to_list()}
+
+    def normalize_speaker(self, speaker: str) -> dict[str, Any]:
+        try:
+            return self.character_library.normalize(speaker)
+        except IdentityValidationError as error:
+            raise ToolValidationError(str(error)) from error
+
+    def arbitrate_identity(
+        self,
+        labeler_speaker: str,
+        verifier_verdict: Optional[str] = None,
+        resolver_verdict: Optional[str] = None,
+        resolver_speaker: Optional[str] = None,
+        normalizer_speaker: Optional[str] = None,
+    ) -> dict[str, Any]:
+        try:
+            return self.identity_arbiter.arbitrate(
+                labeler_speaker=labeler_speaker,
+                verifier_verdict=verifier_verdict,
+                resolver_verdict=resolver_verdict,
+                resolver_speaker=resolver_speaker,
+                normalizer_speaker=normalizer_speaker,
+            )
+        except IdentityValidationError as error:
+            raise ToolValidationError(str(error)) from error
+
     def submit_labels(self, speakers: list[str]) -> dict[str, Any]:
         result = self.validate_labels(speakers)
         result.update(self.commit_labels(result["speakers"]))
         return result
+
+    def _active_or_indexed_dialogue(self, dialogue_index: Optional[int]) -> Dialogue:
+        if dialogue_index is not None:
+            if dialogue_index < 0 or dialogue_index >= self.dialogue_index.total:
+                raise ToolValidationError("dialogue_index is outside the novel dialogue index")
+            return self.dialogue_index.dialogues[dialogue_index]
+        if not self._active_batch:
+            raise ToolValidationError("no active batch; call get_next_dialogue first or pass dialogue_index")
+        return self._active_batch[0]
 
     def validate_labels(self, speakers: list[str]) -> dict[str, Any]:
         if not self._active_batch:
