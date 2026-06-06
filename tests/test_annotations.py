@@ -29,6 +29,33 @@ class AnnotationRecordTest(unittest.TestCase):
         self.assertEqual(loaded["speaker"], "Lawrence")
         self.assertEqual(loaded["evidence_lines"], [10, 12])
         self.assertIsNone(loaded["recovery"])
+        self.assertIsNone(loaded["coordinator_trace"])
+
+    def test_serializes_coordinator_trace(self) -> None:
+        record = AnnotationRecord(
+            index=1,
+            line_number=12,
+            text="Hello.",
+            speaker="Lawrence",
+            evidence_lines=[12],
+            reason="Narration says Lawrence answered.",
+            rejected_candidates=[],
+            confidence="high",
+            tool_summary={},
+            coordinator_trace=[
+                {
+                    "step": 1,
+                    "agent": "labeler",
+                    "action": "accepted",
+                    "reason": "Labeler submitted a speaker candidate.",
+                }
+            ],
+        )
+
+        loaded = json.loads(record.to_json_line())
+
+        self.assertEqual(loaded["coordinator_trace"][0]["agent"], "labeler")
+        self.assertEqual(loaded["coordinator_trace"][0]["action"], "accepted")
 
     def test_store_appends_jsonl_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
