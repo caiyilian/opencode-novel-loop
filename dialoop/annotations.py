@@ -24,6 +24,7 @@ class AnnotationRecord:
     recovery: Optional[dict[str, Any]] = None
     risk: Optional[dict[str, Any]] = None
     verifier: Optional[dict[str, Any]] = None
+    coordinator_trace: Optional[list[dict[str, Any]]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +40,7 @@ class AnnotationRecord:
             "recovery": self.recovery,
             "risk": self.risk,
             "verifier": self.verifier,
+            "coordinator_trace": self.coordinator_trace,
         }
 
     def to_json_line(self) -> str:
@@ -48,6 +50,7 @@ class AnnotationRecord:
         self,
         risk: Optional[dict[str, Any]],
         verifier: Optional[dict[str, Any]] = None,
+        coordinator_trace: Optional[list[dict[str, Any]]] = None,
     ) -> "AnnotationRecord":
         return AnnotationRecord(
             index=self.index,
@@ -62,6 +65,7 @@ class AnnotationRecord:
             recovery=self.recovery,
             risk=risk,
             verifier=verifier,
+            coordinator_trace=_copy_trace(coordinator_trace),
         )
 
 
@@ -214,3 +218,9 @@ def _int_value(value: Any, default: int) -> int:
     if type(value) is int:
         return value
     return default
+
+
+def _copy_trace(value: Optional[list[dict[str, Any]]]) -> Optional[list[dict[str, Any]]]:
+    if value is None:
+        return None
+    return [dict(item) for item in value if isinstance(item, dict)]

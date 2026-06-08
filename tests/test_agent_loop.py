@@ -140,6 +140,9 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(annotation["confidence"], "high")
             self.assertEqual(annotation["risk"]["level"], "low")
             self.assertIsNone(annotation["verifier"])
+            self.assertEqual(annotation["coordinator_trace"][0]["agent"], "labeler")
+            self.assertEqual(annotation["coordinator_trace"][-1]["agent"], "verifier")
+            self.assertEqual(annotation["coordinator_trace"][-1]["action"], "skipped")
             self.assertEqual(annotation["tool_summary"]["read_novel"][0]["requested_start_line"], 1)
 
     def test_risk_mode_verifier_records_review_for_high_risk_annotation(self) -> None:
@@ -192,6 +195,11 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(annotation["risk"]["level"], "high")
             self.assertEqual(annotation["verifier"]["verdict"], "pass")
             self.assertIn("low_confidence", annotation["verifier"]["risk_signal_codes"])
+            self.assertIn(
+                ("verifier", "called"),
+                [(event["agent"], event["action"]) for event in annotation["coordinator_trace"]],
+            )
+            self.assertEqual(annotation["coordinator_trace"][-1]["result"]["verdict"], "accept")
 
     def test_verifier_failure_blocks_write_and_requests_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -409,6 +417,12 @@ class AgentLoopTest(unittest.TestCase):
         self.assertEqual(row["tool_summary"]["record_character"][0]["display_name"], "\u963f\u6d1b")
         self.assertEqual(row["tool_summary"]["normalize_speaker"][0]["suggested_display_name"], "\u963f\u6d1b")
         self.assertEqual(row["tool_summary"]["arbitrate_identity"][0]["decision"], "use_resolved_identity")
+        self.assertIn(
+            "identity_resolver",
+            [event["agent"] for event in row["coordinator_trace"]],
+        )
+        self.assertIn("normalizer", [event["agent"] for event in row["coordinator_trace"]])
+        self.assertIn("arbiter", [event["agent"] for event in row["coordinator_trace"]])
 
     def test_json_action_loop_submits_labels_without_native_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

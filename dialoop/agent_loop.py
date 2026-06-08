@@ -5,10 +5,11 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, TextIO
 
 from .annotations import AnnotationStore, build_annotation_records
+from .coordinator import Coordinator
 from .local_tools import DialoopLocalTools, SpeakerCountMismatchError, ToolValidationError
 from .model_client import ChatMessage, ChatResult, ToolCall
 from .protocol import JsonAction, ProtocolError, local_tool_specs, parse_json_action
-from .risk import RiskAssessment, assess_annotation_risk
+from .risk import assess_annotation_risk
 from .verifier import VerifierAgent
 
 
@@ -221,6 +222,11 @@ class AgentRunner:
                 max_tokens=self.config.verifier_max_tokens,
                 retries=self.config.verifier_retries,
             )
+        )
+        self.coordinator = Coordinator(
+            verifier_agent=self.verifier_agent,
+            verifier_mode=self.config.verifier_mode,
+            verifier_context_budget=self.config.verifier_max_tokens,
         )
         self._used_context_tool = False
         self._used_identity_lookup_tool = False
@@ -514,17 +520,15 @@ class AgentRunner:
         reviewed = []
         for record in records:
             risk = assess_annotation_risk(record)
-            verifier = self._maybe_verify_record(record, risk)
-            reviewed.append(record.with_review(risk=risk.to_dict(), verifier=verifier))
+            decision = self.coordinator.review(record, risk)
+            reviewed.append(
+                record.with_review(
+                    risk=decision.risk,
+                    verifier=decision.verifier,
+                    coordinator_trace=decision.trace_dicts(),
+                )
+            )
         return reviewed
-
-    def _maybe_verify_record(self, record: Any, risk: RiskAssessment) -> Optional[dict[str, Any]]:
-        if self.verifier_agent is None:
-            return None
-        if self.config.verifier_mode == "risk" and not risk.needs_verifier:
-            return None
-        review = self.verifier_agent.verify(record, risk)
-        return review.to_dict()
 
     def _mark_submit_blocked_by_verifier(
         self,
