@@ -128,6 +128,26 @@ class AnnotationSummary:
 
 
 @dataclass(frozen=True)
+class CoordinatorTraceAudit:
+    path: Path
+    total_lines: int
+    valid_records: int
+    json_errors: list[AnnotationJsonError] = field(default_factory=list)
+    records_with_trace: int = 0
+    risk_level_counts: Counter[str] = field(default_factory=Counter)
+    needs_verifier_counts: Counter[str] = field(default_factory=Counter)
+    verifier_action_counts: Counter[str] = field(default_factory=Counter)
+    verifier_action_by_risk: Counter[str] = field(default_factory=Counter)
+    tool_call_counts: Counter[str] = field(default_factory=Counter)
+    tool_observed_counts: Counter[str] = field(default_factory=Counter)
+    problems: list[AnnotationProblem] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return not self.json_errors and not self.problems
+
+
+@dataclass(frozen=True)
 class AnnotationAttribution:
     jsonl_line: int
     risk_level: str
@@ -177,6 +197,12 @@ ANNOTATION_REQUIRED_FIELDS = (
     "risk",
     "verifier",
 )
+COORDINATOR_TRACE_TOOL_AGENTS = {
+    "locate_identity": "identity_locator",
+    "resolve_identity": "identity_resolver",
+    "normalize_speaker": "normalizer",
+    "arbitrate_identity": "arbiter",
+}
 
 DIAGNOSTIC_SECOND_PERSON_MARKERS = ("\u4f60", "\u60a8", "\u6c5d")
 DIAGNOSTIC_PUNCTUATION_CHARS = set(
@@ -476,6 +502,342 @@ def render_annotation_summary(summary: AnnotationSummary, show_problems: int = 0
         if hidden > 0:
             lines.append(f"  ... {hidden} more problem(s) omitted")
     return "\n".join(lines)
+
+
+def audit_coordinator_trace(
+    annotations_path: Path,
+    verifier_mode: str = "risk",
+) -> CoordinatorTraceAudit:
+    if verifier_mode not in {"off", "risk", "all"}:
+        raise QualityError(f"unsupported verifier_mode: {verifier_mode}")
+
+    resolved = annotations_path.expanduser().resolve()
+    if not resolved.exists():
+        raise QualityError(f"annotations file does not exist: {resolved}")
+    if not resolved.is_file():
+        raise QualityError(f"annotations path is not a file: {resolved}")
+
+    total_lines = 0
+    valid_records = 0
+    records_with_trace = 0
+    json_errors: list[AnnotationJsonError] = []
+    problems: list[AnnotationProblem] = []
+    risk_level_counts: Counter[str] = Counter()
+    needs_verifier_counts: Counter[str] = Counter()
+    verifier_action_counts: Counter[str] = Counter()
+    verifier_action_by_risk: Counter[str] = Counter()
+    tool_call_counts: Counter[str] = Counter()
+    tool_observed_counts: Counter[str] = Counter()
+
+    with resolved.open("r", encoding="utf-8") as file:
+        for jsonl_line, raw_line in enumerate(file, start=1):
+            raw = raw_line.rstrip("\n")
+            if not raw.strip():
+                continue
+            total_lines += 1
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError as error:
+                json_errors.append(AnnotationJsonError(jsonl_line=jsonl_line, error=str(error), raw=raw))
+                problems.append(AnnotationProblem(kind="json_error", jsonl_line=jsonl_line, detail=str(error)))
+                continue
+            if not isinstance(row, dict):
+                detail = "annotation row must be a JSON object"
+                json_errors.append(AnnotationJsonError(jsonl_line=jsonl_line, error=detail, raw=raw))
+                problems.append(AnnotationProblem(kind="json_error", jsonl_line=jsonl_line, detail=detail))
+                continue
+
+            valid_records += 1
+            index = _optional_int(row.get("index"))
+            line_number = _optional_int(row.get("line_number"))
+            speaker = _optional_str(row.get("speaker"))
+            text = _optional_str(row.get("text"))
+            risk = row.get("risk") if isinstance(row.get("risk"), dict) else {}
+            risk_level = _counter_key(risk.get("level"))
+            needs_verifier = _counter_key(risk.get("needs_verifier"))
+            risk_level_counts[risk_level] += 1
+            needs_verifier_counts[needs_verifier] += 1
+            tool_summary = row.get("tool_summary") if isinstance(row.get("tool_summary"), dict) else {}
+            called_trace_tools = []
+            for tool_name, agent_name in COORDINATOR_TRACE_TOOL_AGENTS.items():
+                calls = tool_summary.get(tool_name)
+                if not isinstance(calls, list) or not calls:
+                    continue
+                tool_call_counts[tool_name] += 1
+                called_trace_tools.append((tool_name, agent_name))
+
+            trace = row.get("coordinator_trace")
+            if not isinstance(trace, list) or not trace:
+                problems.append(
+                    _trace_problem(
+                        kind="missing_coordinator_trace",
+                        jsonl_line=jsonl_line,
+                        detail="coordinator_trace is missing or empty",
+                        index=index,
+                        line_number=line_number,
+                        speaker=speaker,
+                        text=text,
+                    )
+                )
+                continue
+            records_with_trace += 1
+
+            events = [event for event in trace if isinstance(event, dict)]
+            if len(events) != len(trace):
+                problems.append(
+                    _trace_problem(
+                        kind="invalid_coordinator_trace_event",
+                        jsonl_line=jsonl_line,
+                        detail="coordinator_trace contains a non-object event",
+                        index=index,
+                        line_number=line_number,
+                        speaker=speaker,
+                        text=text,
+                    )
+                )
+
+            action_pairs = {
+                (_optional_str(event.get("agent")) or "none", _optional_str(event.get("action")) or "none")
+                for event in events
+            }
+            if ("labeler", "accepted") not in action_pairs:
+                problems.append(
+                    _trace_problem(
+                        kind="missing_labeler_trace",
+                        jsonl_line=jsonl_line,
+                        detail="coordinator_trace does not include labeler accepted",
+                        index=index,
+                        line_number=line_number,
+                        speaker=speaker,
+                        text=text,
+                    )
+                )
+
+            verifier_actions = []
+            for event in events:
+                agent = _optional_str(event.get("agent")) or "none"
+                action = _optional_str(event.get("action")) or "none"
+                if agent == "verifier":
+                    verifier_actions.append(action)
+                    verifier_action_counts[action] += 1
+                    verifier_action_by_risk[f"{risk_level}:{action}"] += 1
+            problems.extend(
+                _coordinator_verifier_problems(
+                    verifier_mode=verifier_mode,
+                    needs_verifier=needs_verifier,
+                    verifier_actions=verifier_actions,
+                    jsonl_line=jsonl_line,
+                    index=index,
+                    line_number=line_number,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+
+            for tool_name, agent_name in called_trace_tools:
+                if (agent_name, "observed") in action_pairs:
+                    tool_observed_counts[tool_name] += 1
+                    continue
+                problems.append(
+                    _trace_problem(
+                        kind="missing_tool_observed_trace",
+                        jsonl_line=jsonl_line,
+                        detail=f"{tool_name} was called but {agent_name} observed trace is missing",
+                        index=index,
+                        line_number=line_number,
+                        speaker=speaker,
+                        text=text,
+                    )
+                )
+
+    return CoordinatorTraceAudit(
+        path=resolved,
+        total_lines=total_lines,
+        valid_records=valid_records,
+        json_errors=json_errors,
+        records_with_trace=records_with_trace,
+        risk_level_counts=risk_level_counts,
+        needs_verifier_counts=needs_verifier_counts,
+        verifier_action_counts=verifier_action_counts,
+        verifier_action_by_risk=verifier_action_by_risk,
+        tool_call_counts=tool_call_counts,
+        tool_observed_counts=tool_observed_counts,
+        problems=problems,
+    )
+
+
+def render_coordinator_trace_audit(audit: CoordinatorTraceAudit, show_problems: int = 0) -> str:
+    lines = [
+        "Dialoop coordinator trace audit",
+        f"  path: {audit.path}",
+        f"  total_lines: {audit.total_lines}",
+        f"  valid_records: {audit.valid_records}",
+        f"  json_errors: {len(audit.json_errors)}",
+        f"  records_with_trace: {audit.records_with_trace}",
+        f"  risk.level: {_render_counter(audit.risk_level_counts, ['high', 'medium', 'low', 'none'])}",
+        (
+            "  risk.needs_verifier: "
+            f"{_render_counter(audit.needs_verifier_counts, ['true', 'false', 'none'])}"
+        ),
+        (
+            "  verifier.trace_actions: "
+            f"{_render_counter(audit.verifier_action_counts, ['called', 'accepted', 'rejected', 'uncertain', 'skipped'])}"
+        ),
+        f"  verifier.by_risk: {_render_counter(audit.verifier_action_by_risk, _verifier_by_risk_order())}",
+        f"  tool_calls: {_render_counter(audit.tool_call_counts, list(COORDINATOR_TRACE_TOOL_AGENTS))}",
+        (
+            "  tool_observed: "
+            f"{_render_counter(audit.tool_observed_counts, list(COORDINATOR_TRACE_TOOL_AGENTS))}"
+        ),
+        f"  problems: {len(audit.problems)}",
+    ]
+    if show_problems > 0 and audit.problems:
+        lines.append("")
+        lines.append("Problems:")
+        for problem in audit.problems[:show_problems]:
+            lines.append(_render_problem(problem))
+        hidden = len(audit.problems) - min(show_problems, len(audit.problems))
+        if hidden > 0:
+            lines.append(f"  ... {hidden} more problem(s) omitted")
+    return "\n".join(lines)
+
+
+def _coordinator_verifier_problems(
+    *,
+    verifier_mode: str,
+    needs_verifier: str,
+    verifier_actions: list[str],
+    jsonl_line: int,
+    index: Optional[int],
+    line_number: Optional[int],
+    speaker: Optional[str],
+    text: Optional[str],
+) -> list[AnnotationProblem]:
+    terminal_actions = {"accepted", "rejected", "uncertain"}
+    problems: list[AnnotationProblem] = []
+    if verifier_mode == "off":
+        if "skipped" not in verifier_actions:
+            problems.append(
+                _trace_problem(
+                    kind="missing_verifier_skipped_trace",
+                    jsonl_line=jsonl_line,
+                    detail="verifier_mode=off but verifier skipped trace is missing",
+                    index=index,
+                    line_number=line_number,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+        return problems
+    if verifier_mode == "all":
+        if "called" not in verifier_actions:
+            problems.append(
+                _trace_problem(
+                    kind="missing_verifier_called_trace",
+                    jsonl_line=jsonl_line,
+                    detail="verifier_mode=all but verifier called trace is missing",
+                    index=index,
+                    line_number=line_number,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+        if not any(action in terminal_actions for action in verifier_actions):
+            problems.append(
+                _trace_problem(
+                    kind="missing_verifier_terminal_trace",
+                    jsonl_line=jsonl_line,
+                    detail="verifier was expected to finish with accepted/rejected/uncertain",
+                    index=index,
+                    line_number=line_number,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+        return problems
+    if needs_verifier == "true":
+        if "called" not in verifier_actions:
+            problems.append(
+                _trace_problem(
+                    kind="missing_verifier_called_trace",
+                    jsonl_line=jsonl_line,
+                    detail="risk.needs_verifier=true but verifier called trace is missing",
+                    index=index,
+                    line_number=line_number,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+        if not any(action in terminal_actions for action in verifier_actions):
+            problems.append(
+                _trace_problem(
+                    kind="missing_verifier_terminal_trace",
+                    jsonl_line=jsonl_line,
+                    detail="risk.needs_verifier=true but verifier accepted/rejected/uncertain trace is missing",
+                    index=index,
+                    line_number=line_number,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+    elif needs_verifier == "false":
+        if "skipped" not in verifier_actions:
+            problems.append(
+                _trace_problem(
+                    kind="missing_verifier_skipped_trace",
+                    jsonl_line=jsonl_line,
+                    detail="risk.needs_verifier=false but verifier skipped trace is missing",
+                    index=index,
+                    line_number=line_number,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+    return problems
+
+
+def _trace_problem(
+    *,
+    kind: str,
+    jsonl_line: int,
+    detail: str,
+    index: Optional[int],
+    line_number: Optional[int],
+    speaker: Optional[str],
+    text: Optional[str],
+) -> AnnotationProblem:
+    return AnnotationProblem(
+        kind=kind,
+        jsonl_line=jsonl_line,
+        detail=detail,
+        index=index,
+        line_number=line_number,
+        speaker=speaker,
+        text=text,
+    )
+
+
+def _render_problem(problem: AnnotationProblem) -> str:
+    location = []
+    if problem.index is not None:
+        location.append(f"index={problem.index}")
+    if problem.line_number is not None:
+        location.append(f"line={problem.line_number}")
+    if problem.speaker:
+        location.append(f"speaker={problem.speaker}")
+    prefix = f"  - jsonl_line={problem.jsonl_line} kind={problem.kind}"
+    if location:
+        prefix = f"{prefix} {' '.join(location)}"
+    text = f" text={problem.text}" if problem.text else ""
+    return f"{prefix} detail={problem.detail}{text}"
+
+
+def _verifier_by_risk_order() -> list[str]:
+    return [
+        f"{risk}:{action}"
+        for risk in ("high", "medium", "low", "none")
+        for action in ("called", "accepted", "rejected", "uncertain", "skipped")
+    ]
 
 
 def attribute_mismatches(
