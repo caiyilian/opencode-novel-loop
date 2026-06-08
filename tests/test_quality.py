@@ -9,11 +9,13 @@ from pathlib import Path
 
 from dialoop.quality import (
     QualityError,
+    audit_coordinator_trace,
     attribute_mismatches,
     evaluate_labels,
     extract_expected_dialogues,
     load_terms,
     render_annotation_summary,
+    render_coordinator_trace_audit,
     render_error_labels,
     render_mismatch_attribution_report,
     scan_terms,
@@ -239,6 +241,114 @@ class QualityTest(unittest.TestCase):
         self.assertIn("verifier.verdict: uncertain=1", stdout.getvalue())
         self.assertIn("kind=verifier_uncertain", stdout.getvalue())
 
+    def test_audit_coordinator_trace_accepts_expected_risk_and_tool_traces(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            annotations_path = Path(directory) / "annotations.jsonl"
+            high = annotation_row(index=0, risk_level="high", needs_verifier=True, verifier_verdict="pass")
+            high["coordinator_trace"] = [
+                trace_event("labeler", "accepted"),
+                trace_event("verifier", "called"),
+                trace_event("verifier", "accepted"),
+            ]
+            low = annotation_row(index=1, risk_level="low", needs_verifier=False, verifier_verdict=None)
+            low["coordinator_trace"] = [
+                trace_event("labeler", "accepted"),
+                trace_event("verifier", "skipped"),
+            ]
+            tool_row = annotation_row(index=2, risk_level="medium", needs_verifier=False, verifier_verdict=None)
+            tool_row["tool_summary"] = {
+                "resolve_identity": [{"verdict": "resolved", "recommended_speaker": "Stable Name"}],
+                "normalize_speaker": [{"suggested_display_name": "Stable Name"}],
+            }
+            tool_row["coordinator_trace"] = [
+                trace_event("labeler", "accepted"),
+                trace_event("identity_resolver", "observed"),
+                trace_event("normalizer", "observed"),
+                trace_event("verifier", "skipped"),
+            ]
+            annotations_path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in [high, low, tool_row]),
+                encoding="utf-8",
+            )
+
+            audit = audit_coordinator_trace(annotations_path)
+            rendered = render_coordinator_trace_audit(audit)
+
+        self.assertTrue(audit.passed)
+        self.assertEqual(audit.records_with_trace, 3)
+        self.assertEqual(audit.verifier_action_counts["called"], 1)
+        self.assertEqual(audit.verifier_action_counts["skipped"], 2)
+        self.assertEqual(audit.tool_call_counts["resolve_identity"], 1)
+        self.assertEqual(audit.tool_observed_counts["resolve_identity"], 1)
+        self.assertIn("problems: 0", rendered)
+
+    def test_audit_coordinator_trace_reports_missing_verifier_and_tool_observed_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            annotations_path = Path(directory) / "annotations.jsonl"
+            missing_trace = annotation_row(
+                index=0,
+                risk_level="low",
+                needs_verifier=False,
+                verifier_verdict=None,
+            )
+            missing_verifier = annotation_row(
+                index=1,
+                risk_level="high",
+                needs_verifier=True,
+                verifier_verdict="pass",
+            )
+            missing_verifier["coordinator_trace"] = [trace_event("labeler", "accepted")]
+            missing_observed = annotation_row(
+                index=2,
+                risk_level="low",
+                needs_verifier=False,
+                verifier_verdict=None,
+            )
+            missing_observed["tool_summary"] = {
+                "locate_identity": [{"candidate_count": 1}],
+            }
+            missing_observed["coordinator_trace"] = [
+                trace_event("labeler", "accepted"),
+                trace_event("verifier", "skipped"),
+            ]
+            annotations_path.write_text(
+                "\n".join(
+                    json.dumps(row, ensure_ascii=False)
+                    for row in [missing_trace, missing_verifier, missing_observed]
+                ),
+                encoding="utf-8",
+            )
+
+            audit = audit_coordinator_trace(annotations_path)
+            rendered = render_coordinator_trace_audit(audit, show_problems=5)
+            problem_kinds = {problem.kind for problem in audit.problems}
+
+        self.assertFalse(audit.passed)
+        self.assertIn("missing_coordinator_trace", problem_kinds)
+        self.assertIn("missing_verifier_called_trace", problem_kinds)
+        self.assertIn("missing_verifier_terminal_trace", problem_kinds)
+        self.assertIn("missing_tool_observed_trace", problem_kinds)
+        self.assertIn("Problems:", rendered)
+
+    def test_quality_cli_coordinator_trace_reports_audit_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            annotations_path = Path(directory) / "annotations.jsonl"
+            row = annotation_row(index=0, risk_level="low", needs_verifier=False, verifier_verdict=None)
+            row["coordinator_trace"] = [
+                trace_event("labeler", "accepted"),
+                trace_event("verifier", "skipped"),
+            ]
+            annotations_path.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["coordinator-trace", "--annotations", str(annotations_path)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Dialoop coordinator trace audit", stdout.getvalue())
+        self.assertIn("records_with_trace: 1", stdout.getvalue())
+        self.assertIn("problems: 0", stdout.getvalue())
+
     def test_attribute_mismatches_groups_annotation_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -383,6 +493,15 @@ def annotation_row(
             "signals": [],
         },
         "verifier": verifier,
+    }
+
+
+def trace_event(agent: str, action: str) -> dict:
+    return {
+        "step": 1,
+        "agent": agent,
+        "action": action,
+        "reason": f"{agent} {action}",
     }
 
 
