@@ -42,6 +42,7 @@ class VerifierTest(unittest.TestCase):
         self.assertEqual(messages[0].role, "system")
         self.assertIn("Verifier Agent", messages[0].content)
         self.assertIn('"verdict"', messages[1].content)
+        self.assertIn('"confidence"', messages[1].content)
         self.assertIn('"risk"', messages[1].content)
 
     def test_review_from_payload_keeps_counter_evidence_lines(self) -> None:
@@ -53,12 +54,15 @@ class VerifierTest(unittest.TestCase):
                 "verdict": "fail",
                 "reason": "Line 3 contradicts the submitted speaker.",
                 "counter_evidence_lines": [3, 3, "bad", -1],
+                "confidence": "high",
             },
             risk,
         )
 
         self.assertTrue(review.blocks_submission)
         self.assertEqual(review.counter_evidence_lines, [3])
+        self.assertEqual(review.confidence, "high")
+        self.assertEqual(review.to_dict()["confidence"], "high")
         self.assertIn("low_confidence", review.risk_signal_codes)
 
     def test_agent_returns_error_review_for_invalid_json(self) -> None:

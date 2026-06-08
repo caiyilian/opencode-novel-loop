@@ -81,6 +81,7 @@ class CoordinatorTest(unittest.TestCase):
                 reason="Evidence is enough.",
                 counter_evidence_lines=[],
                 risk_signal_codes=["low_confidence"],
+                confidence="high",
             )
         )
 
@@ -96,6 +97,32 @@ class CoordinatorTest(unittest.TestCase):
         self.assertIn(("verifier", "called"), [(event["agent"], event["action"]) for event in trace])
         self.assertIn(("verifier", "accepted"), [(event["agent"], event["action"]) for event in trace])
         self.assertEqual(trace[-1]["result"]["verdict"], "accept")
+
+    def test_low_confidence_high_risk_verifier_pass_goes_to_arbiter_and_blocks(self) -> None:
+        verifier = FakeVerifierAgent(
+            VerifierReview(
+                enabled=True,
+                verdict="pass",
+                reason="Weak pass.",
+                counter_evidence_lines=[],
+                risk_signal_codes=["low_confidence"],
+                confidence="low",
+            )
+        )
+
+        decision = Coordinator(verifier, verifier_mode="risk").review(
+            sample_record(confidence="low"),
+            risk("high", "low_confidence"),
+        )
+        trace = decision.trace_dicts()
+
+        self.assertTrue(decision.blocks_submission)
+        self.assertEqual(decision.verifier["verdict"], "pass")
+        self.assertEqual(decision.verifier["confidence"], "low")
+        self.assertEqual(decision.arbiter["decision"], "needs_more_evidence")
+        self.assertTrue(decision.arbiter["blocks_submission"])
+        self.assertIn(("arbiter", "called"), [(event["agent"], event["action"]) for event in trace])
+        self.assertIn(("arbiter", "uncertain"), [(event["agent"], event["action"]) for event in trace])
 
     def test_risk_mode_skips_verifier_for_low_risk_annotation(self) -> None:
         verifier = FakeVerifierAgent(
@@ -125,6 +152,7 @@ class CoordinatorTest(unittest.TestCase):
                 reason="Counter-evidence points to B.",
                 counter_evidence_lines=[12],
                 risk_signal_codes=["fallback_annotation_metadata"],
+                confidence="high",
             )
         )
 
@@ -136,10 +164,35 @@ class CoordinatorTest(unittest.TestCase):
 
         self.assertTrue(decision.blocks_submission)
         self.assertEqual(decision.verifier["verdict"], "fail")
-        self.assertEqual(trace[-1]["agent"], "verifier")
-        self.assertEqual(trace[-1]["action"], "rejected")
-        self.assertEqual(trace[-1]["result"]["verdict"], "reject")
-        self.assertEqual(trace[-1]["result"]["counter_evidence_lines"], [12])
+        self.assertEqual(decision.arbiter["decision"], "reject_labeler")
+        self.assertTrue(decision.arbiter["blocks_submission"])
+        self.assertIn(("verifier", "rejected"), [(event["agent"], event["action"]) for event in trace])
+        self.assertIn(("arbiter", "called"), [(event["agent"], event["action"]) for event in trace])
+        self.assertIn(("arbiter", "rejected"), [(event["agent"], event["action"]) for event in trace])
+        arbiter_events = [event for event in trace if event["agent"] == "arbiter" and event["action"] == "rejected"]
+        self.assertEqual(arbiter_events[0]["result"]["verdict"], "reject")
+        self.assertEqual(arbiter_events[0]["result"]["counter_evidence_lines"], [12])
+
+    def test_verifier_uncertain_records_arbiter_reason_without_blocking(self) -> None:
+        verifier = FakeVerifierAgent(
+            VerifierReview(
+                enabled=True,
+                verdict="uncertain",
+                reason="Evidence is too weak.",
+                counter_evidence_lines=[],
+                risk_signal_codes=["short_dialogue"],
+                confidence="low",
+            )
+        )
+
+        decision = Coordinator(verifier, verifier_mode="all").review(sample_record(), risk("low"))
+        trace = decision.trace_dicts()
+
+        self.assertFalse(decision.blocks_submission)
+        self.assertEqual(decision.verifier["verdict"], "uncertain")
+        self.assertEqual(decision.arbiter["decision"], "needs_more_evidence")
+        self.assertIn("could not fully confirm", decision.arbiter["reason"])
+        self.assertIn(("arbiter", "uncertain"), [(event["agent"], event["action"]) for event in trace])
 
     def test_records_existing_identity_tool_result_in_trace(self) -> None:
         record = sample_record(

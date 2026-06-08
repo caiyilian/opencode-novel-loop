@@ -12,7 +12,7 @@ from dialoop.cli import main
 from dialoop.model_client import ChatResult, ToolCall
 
 
-VERIFIER_PASS = ChatResult(content='{"verdict":"pass","reason":"ok","counter_evidence_lines":[]}')
+VERIFIER_PASS = ChatResult(content='{"verdict":"pass","reason":"ok","counter_evidence_lines":[],"confidence":"high"}')
 
 
 class FakeOpenAICompatibleClient:
