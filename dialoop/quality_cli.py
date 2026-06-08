@@ -8,10 +8,12 @@ from typing import Optional, Sequence
 from .quality import (
     DEFAULT_SCAN_PATHS,
     QualityError,
+    audit_coordinator_trace,
     attribute_mismatches,
     evaluate_labels,
     load_terms,
     render_annotation_summary,
+    render_coordinator_trace_audit,
     render_error_labels,
     render_evaluation_report,
     render_mismatch_attribution_report,
@@ -100,6 +102,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the first N verifier or structural problems.",
     )
 
+    coordinator_trace = subparsers.add_parser(
+        "coordinator-trace",
+        help="Audit coordinator_trace coverage in annotations.jsonl.",
+    )
+    coordinator_trace.add_argument(
+        "--annotations",
+        type=Path,
+        required=True,
+        help="Path to .dialoop/annotations.jsonl.",
+    )
+    coordinator_trace.add_argument(
+        "--verifier-mode",
+        choices=["off", "risk", "all"],
+        default="risk",
+        help="Verifier mode used when the annotations were generated.",
+    )
+    coordinator_trace.add_argument(
+        "--show-problems",
+        type=non_negative_int,
+        default=0,
+        help="Print the first N coordinator trace audit problems.",
+    )
+
     attribution = subparsers.add_parser(
         "mismatch-attribution",
         help="Explain answer mismatches using annotation risk and verifier metadata.",
@@ -142,6 +167,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_scan_terms(args)
         if args.command == "annotations-summary":
             return run_annotations_summary(args)
+        if args.command == "coordinator-trace":
+            return run_coordinator_trace(args)
         if args.command == "mismatch-attribution":
             return run_mismatch_attribution(args)
     except QualityError as error:
@@ -173,6 +200,12 @@ def run_annotations_summary(args: argparse.Namespace) -> int:
     return 1 if summary.has_structural_errors else 0
 
 
+def run_coordinator_trace(args: argparse.Namespace) -> int:
+    audit = audit_coordinator_trace(args.annotations, verifier_mode=args.verifier_mode)
+    print(render_coordinator_trace_audit(audit, show_problems=args.show_problems))
+    return 0 if audit.passed else 1
+
+
 def run_mismatch_attribution(args: argparse.Namespace) -> int:
     report = attribute_mismatches(
         answer_path=args.answers,
@@ -195,6 +228,10 @@ def scan_terms_main(argv: Optional[Sequence[str]] = None) -> int:
 
 def annotations_summary_main(argv: Optional[Sequence[str]] = None) -> int:
     return main(["annotations-summary", *(argv if argv is not None else sys.argv[1:])])
+
+
+def coordinator_trace_main(argv: Optional[Sequence[str]] = None) -> int:
+    return main(["coordinator-trace", *(argv if argv is not None else sys.argv[1:])])
 
 
 def mismatch_attribution_main(argv: Optional[Sequence[str]] = None) -> int:
