@@ -1,5 +1,6 @@
 python -m dialoop.cli novel.txt \
   --output labeled_test.txt \
+  --reset-output \
   --annotations-output .dialoop/annotations.jsonl \
   --batch-size 1 \
   --max-tool-steps 20 \
