@@ -18,6 +18,8 @@ from dialoop.quality import (
     render_coordinator_trace_audit,
     render_error_labels,
     render_mismatch_attribution_report,
+    render_verifier_false_pass_report,
+    report_verifier_false_passes,
     scan_terms,
     summarize_annotations,
 )
@@ -459,6 +461,95 @@ class QualityTest(unittest.TestCase):
         self.assertIn("incorrect: 1", stdout.getvalue())
         self.assertIn("verifier.verdict: pass=1", stdout.getvalue())
         self.assertIn("verifier_reason=pass reason", stdout.getvalue())
+
+    def test_report_verifier_false_passes_lists_passed_mismatches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            answers_path = root / "answers.txt"
+            labels_path = root / "labels.txt"
+            annotations_path = root / "annotations.jsonl"
+            answers_path.write_text(
+                "\u3010A\u3011\u300cfirst\u300d\n\u3010B\u3011\u300csecond\u300d\n",
+                encoding="utf-8",
+            )
+            labels_path.write_text("B\nA\n", encoding="utf-8")
+            rows = [
+                {
+                    "index": 0,
+                    "confidence": "high",
+                    "risk": {
+                        "level": "high",
+                        "needs_verifier": True,
+                        "signals": [{"code": "short_question", "level": "medium"}],
+                    },
+                    "verifier": {"enabled": True, "verdict": "pass", "reason": "pass reason"},
+                },
+                {
+                    "index": 1,
+                    "confidence": "high",
+                    "risk": {"level": "high", "needs_verifier": True, "signals": []},
+                    "verifier": {"enabled": True, "verdict": "uncertain", "reason": "uncertain reason"},
+                },
+            ]
+            annotations_path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+                encoding="utf-8",
+            )
+
+            report = report_verifier_false_passes(
+                answer_path=answers_path,
+                labels_path=labels_path,
+                annotations_path=annotations_path,
+            )
+            rendered = render_verifier_false_pass_report(report, max_errors=1)
+
+        self.assertEqual(report.total_false_passes, 1)
+        self.assertEqual(report.high_risk_false_passes, 1)
+        self.assertIn("Dialoop verifier false-pass report", rendered)
+        self.assertIn("verifier_false_passes: 1", rendered)
+        self.assertIn("high_risk_verifier_pass: 1", rendered)
+        self.assertIn("index=0", rendered)
+        self.assertIn("verifier_reason=pass reason", rendered)
+        self.assertNotIn("index=1", rendered)
+
+    def test_quality_cli_verifier_false_pass_reports_passed_mismatches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            answers_path = root / "answers.txt"
+            labels_path = root / "labels.txt"
+            annotations_path = root / "annotations.jsonl"
+            answers_path.write_text("\u3010A\u3011\u300cfirst\u300d\n", encoding="utf-8")
+            labels_path.write_text("B\n", encoding="utf-8")
+            annotations_path.write_text(
+                json.dumps(
+                    {
+                        "index": 0,
+                        "confidence": "high",
+                        "risk": {"level": "high", "needs_verifier": True, "signals": []},
+                        "verifier": {"enabled": True, "verdict": "pass", "reason": "pass reason"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "verifier-false-pass",
+                        "--answers",
+                        str(answers_path),
+                        "--labels",
+                        str(labels_path),
+                        "--annotations",
+                        str(annotations_path),
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Dialoop verifier false-pass report", stdout.getvalue())
+        self.assertIn("high_risk_verifier_pass: 1", stdout.getvalue())
 
 def annotation_row(
     *,

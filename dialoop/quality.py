@@ -184,6 +184,24 @@ class MismatchAttributionReport:
         return len(self.items) - len(self.missing_annotation_indices)
 
 
+@dataclass(frozen=True)
+class VerifierFalsePassReport:
+    attribution: MismatchAttributionReport
+    items: list[MismatchAttribution] = field(default_factory=list)
+
+    @property
+    def total_false_passes(self) -> int:
+        return len(self.items)
+
+    @property
+    def high_risk_false_passes(self) -> int:
+        return sum(
+            1
+            for item in self.items
+            if item.annotation is not None and item.annotation.risk_level == "high"
+        )
+
+
 ANNOTATION_REQUIRED_FIELDS = (
     "index",
     "line_number",
@@ -1046,6 +1064,75 @@ def render_mismatch_attribution_report(
         hidden = len(report.items) - len(shown)
         if hidden > 0:
             lines.append(f"  ... {hidden} more mismatch(es) omitted")
+    return "\n".join(lines)
+
+
+def report_verifier_false_passes(
+    *,
+    answer_path: Path,
+    labels_path: Path,
+    annotations_path: Path,
+    novel_path: Optional[Path] = None,
+) -> VerifierFalsePassReport:
+    attribution = attribute_mismatches(
+        answer_path=answer_path,
+        labels_path=labels_path,
+        annotations_path=annotations_path,
+        novel_path=novel_path,
+    )
+    items = [
+        item
+        for item in attribution.items
+        if item.annotation is not None and item.annotation.verifier_verdict == "pass"
+    ]
+    return VerifierFalsePassReport(attribution=attribution, items=items)
+
+
+def render_verifier_false_pass_report(
+    report: VerifierFalsePassReport,
+    max_errors: Optional[int] = 50,
+) -> str:
+    attribution = report.attribution
+    evaluation = attribution.evaluation
+    lines = [
+        "Dialoop verifier false-pass report",
+        f"  expected: {evaluation.expected_count}",
+        f"  labels: {evaluation.label_count}",
+        f"  incorrect: {evaluation.incorrect_count}",
+        f"  annotations: {attribution.annotations_path}",
+        f"  annotation_records: {attribution.annotation_records}",
+        f"  verifier_false_passes: {report.total_false_passes}",
+        f"  high_risk_verifier_pass: {report.high_risk_false_passes}",
+    ]
+    if evaluation.novel_dialogue_count is not None:
+        lines.append(f"  novel_dialogues: {evaluation.novel_dialogue_count}")
+    lines.extend(
+        [
+            "",
+            "False-pass samples:",
+        ]
+    )
+    if not report.items:
+        lines.append("  none")
+        return "\n".join(lines)
+
+    shown = report.items if max_errors is None else report.items[:max_errors]
+    for item in shown:
+        mismatch = item.mismatch
+        annotation = item.annotation
+        risk = annotation.risk_level if annotation is not None else "missing"
+        signals = ",".join(annotation.risk_signal_codes) if annotation and annotation.risk_signal_codes else "none"
+        hints = ",".join(item.diagnostic_hints) if item.diagnostic_hints else "none"
+        verifier_reason = annotation.verifier_reason if annotation and annotation.verifier_reason else "none"
+        lines.append(
+            f"  - index={mismatch.index} line={mismatch.line_number} "
+            f"expected={mismatch.expected} actual={mismatch.actual} "
+            f"risk={risk} signals={signals} hints={hints} "
+            f"verifier_reason={verifier_reason} text={mismatch.text}"
+        )
+    hidden = len(report.items) - len(shown)
+    if hidden > 0:
+        lines.append(f"  ... {hidden} more false-pass sample(s) omitted")
     return "\n".join(lines)
 
 
