@@ -18,6 +18,8 @@ from .quality import (
     render_evaluation_report,
     render_mismatch_attribution_report,
     render_term_scan_report,
+    render_verifier_false_pass_report,
+    report_verifier_false_passes,
     scan_terms,
     summarize_annotations,
 )
@@ -154,6 +156,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print all mismatch attribution rows.",
     )
 
+    false_pass = subparsers.add_parser(
+        "verifier-false-pass",
+        help="List answer mismatches that the Verifier passed.",
+    )
+    false_pass.add_argument("--answers", type=Path, required=True, help="Annotated answer text file or directory.")
+    false_pass.add_argument("--labels", type=Path, required=True, help="One-speaker-per-line label file.")
+    false_pass.add_argument(
+        "--annotations",
+        type=Path,
+        required=True,
+        help="Path to .dialoop/annotations.jsonl.",
+    )
+    false_pass.add_argument(
+        "--novel",
+        type=Path,
+        help="Optional source novel file for dialogue count and diagnostic hints.",
+    )
+    false_pass.add_argument(
+        "--max-errors",
+        type=positive_int,
+        default=50,
+        help="Maximum false-pass rows to print.",
+    )
+    false_pass.add_argument(
+        "--all-errors",
+        action="store_true",
+        help="Print all false-pass rows.",
+    )
+
     return parser
 
 
@@ -171,6 +202,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_coordinator_trace(args)
         if args.command == "mismatch-attribution":
             return run_mismatch_attribution(args)
+        if args.command == "verifier-false-pass":
+            return run_verifier_false_pass(args)
     except QualityError as error:
         parser.exit(2, f"dialoop-quality: error: {error}\n")
     raise AssertionError(f"unhandled command: {args.command}")
@@ -218,6 +251,18 @@ def run_mismatch_attribution(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_verifier_false_pass(args: argparse.Namespace) -> int:
+    report = report_verifier_false_passes(
+        answer_path=args.answers,
+        labels_path=args.labels,
+        annotations_path=args.annotations,
+        novel_path=args.novel,
+    )
+    max_errors = None if args.all_errors else args.max_errors
+    print(render_verifier_false_pass_report(report, max_errors=max_errors))
+    return 0
+
+
 def evaluate_main(argv: Optional[Sequence[str]] = None) -> int:
     return main(["evaluate", *(argv if argv is not None else sys.argv[1:])])
 
@@ -236,6 +281,10 @@ def coordinator_trace_main(argv: Optional[Sequence[str]] = None) -> int:
 
 def mismatch_attribution_main(argv: Optional[Sequence[str]] = None) -> int:
     return main(["mismatch-attribution", *(argv if argv is not None else sys.argv[1:])])
+
+
+def verifier_false_pass_main(argv: Optional[Sequence[str]] = None) -> int:
+    return main(["verifier-false-pass", *(argv if argv is not None else sys.argv[1:])])
 
 
 if __name__ == "__main__":
