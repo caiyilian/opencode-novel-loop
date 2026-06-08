@@ -230,10 +230,12 @@ class AgentRunner:
         )
         self._used_context_tool = False
         self._used_identity_lookup_tool = False
+        self._blocked_review_attempts: list[dict[str, Any]] = []
 
     def run_one_batch(self) -> AgentBatchResult:
         self._used_context_tool = False
         self._used_identity_lookup_tool = False
+        self._blocked_review_attempts = []
         initial_batch = self.tools.get_next_dialogue()
         if initial_batch["done"]:
             return AgentBatchResult(
@@ -486,7 +488,10 @@ class AgentRunner:
                 speakers=speakers,
                 submit_args=accepted_submit.arguments,
                 tool_summary=summarize_tool_history(history),
-                recovery=submit_recovery_info(accepted_submit.result),
+                recovery=submit_recovery_info(
+                    accepted_submit.result,
+                    blocked_reviews=self._blocked_review_attempts,
+                ),
             )
             records = self._review_annotation_records(records)
             blocking_review = first_blocking_verifier_review(records)
@@ -525,6 +530,7 @@ class AgentRunner:
                 record.with_review(
                     risk=decision.risk,
                     verifier=decision.verifier,
+                    arbiter=decision.arbiter,
                     coordinator_trace=decision.trace_dicts(),
                 )
             )
@@ -539,6 +545,9 @@ class AgentRunner:
         accepted_submit.result["pending_review"] = False
         accepted_submit.result["error"] = "verifier rejected the submitted speaker before label write"
         accepted_submit.result["verifier"] = review
+        if isinstance(review.get("arbiter"), dict):
+            accepted_submit.result["arbiter"] = review["arbiter"]
+        self._blocked_review_attempts.append(blocked_review_attempt(review))
 
     def _execute_submit_labels(self, args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -722,23 +731,55 @@ def summarize_tool_history(history: list[ToolExecution]) -> dict[str, Any]:
     return summary
 
 
-def submit_recovery_info(result: dict[str, Any]) -> Optional[dict[str, Any]]:
+def submit_recovery_info(
+    result: dict[str, Any],
+    blocked_reviews: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
     recovery = {
         key: result[key]
         for key in ("warning", "expected_count", "received_count", "ignored_speakers")
         if key in result
     }
+    if blocked_reviews:
+        recovery["blocked_reviews"] = [dict(review) for review in blocked_reviews]
     return recovery or None
+
+
+def blocked_review_attempt(review: dict[str, Any]) -> dict[str, Any]:
+    data = {
+        key: review[key]
+        for key in ("index", "line_number", "speaker", "verdict", "reason", "risk_signal_codes")
+        if key in review
+    }
+    arbiter = review.get("arbiter")
+    if isinstance(arbiter, dict):
+        data["arbiter"] = {
+            key: arbiter[key]
+            for key in ("decision", "verdict", "reason", "blocks_submission", "confidence")
+            if key in arbiter
+        }
+    return data
 
 
 def first_blocking_verifier_review(records: list[Any]) -> Optional[dict[str, Any]]:
     for record in records:
         verifier = record.verifier
+        arbiter = getattr(record, "arbiter", None)
+        if isinstance(arbiter, dict) and arbiter.get("blocks_submission") is True:
+            review = dict(verifier) if isinstance(verifier, dict) else {}
+            return {
+                **review,
+                "arbiter": arbiter,
+                "index": record.index,
+                "line_number": record.line_number,
+                "speaker": record.speaker,
+            }
         if not isinstance(verifier, dict):
             continue
         if verifier.get("enabled") is True and verifier.get("verdict") == "fail":
             return {
                 **verifier,
+                "arbiter": arbiter if isinstance(arbiter, dict) else None,
                 "index": record.index,
                 "line_number": record.line_number,
                 "speaker": record.speaker,
@@ -751,11 +792,14 @@ def verifier_retry_message(review: dict[str, Any]) -> str:
     if not isinstance(risk_codes, list):
         risk_codes = []
     reason = review.get("reason") if isinstance(review.get("reason"), str) else "no reason"
+    arbiter = review.get("arbiter") if isinstance(review.get("arbiter"), dict) else {}
+    arbiter_reason = arbiter.get("reason") if isinstance(arbiter.get("reason"), str) else None
+    arbiter_text = f" Arbiter reason: {arbiter_reason}." if arbiter_reason else ""
     return (
         "Verifier rejected the submitted label before writing it to the output file. "
         f"Dialogue index={review.get('index')} line={review.get('line_number')} "
         f"speaker={review.get('speaker')} was not accepted. "
-        f"Verifier reason: {reason}. "
+        f"Verifier reason: {reason}.{arbiter_text} "
         f"Risk signals: {', '.join(str(code) for code in risk_codes) or 'none'}. "
         "Read or search more context if needed, then call submit_labels again with a corrected speaker."
     )
