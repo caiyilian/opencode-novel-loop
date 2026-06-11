@@ -165,6 +165,19 @@ class StructuredArbiterAgent:
                 "confidence": "low",
                 "blocks_submission": False,
             }
+        fragile_reason = _fragile_high_risk_pass_reason(record, risk, verifier_result)
+        if fragile_reason is not None:
+            return {
+                "enabled": True,
+                "decision": "needs_more_evidence",
+                "verdict": "uncertain",
+                "recommended_speaker": record.speaker,
+                "evidence_lines": list(labeler_result.evidence_lines or []),
+                "counter_evidence_lines": [],
+                "reason": f"High-risk verifier pass needs stronger disambiguation before writing: {fragile_reason}",
+                "confidence": "low",
+                "blocks_submission": True,
+            }
         if risk.needs_verifier and verifier_result.verdict == "accept" and verifier_result.confidence == "low":
             return {
                 "enabled": True,
@@ -394,7 +407,7 @@ class Coordinator:
     ) -> Optional[dict[str, Any]]:
         if verifier is None or verifier_result is None:
             return None
-        if not _needs_arbiter(verifier_result, risk):
+        if not _needs_arbiter(verifier_result, risk, record):
             return None
 
         trace.append(
@@ -402,7 +415,7 @@ class Coordinator:
                 step=len(trace) + 1,
                 agent="arbiter",
                 action="called",
-                reason=_arbiter_call_reason(verifier_result, risk),
+                reason=_arbiter_call_reason(verifier_result, risk, record),
                 metadata={
                     "agent_spec": self.agent_specs["arbiter"].to_dict(),
                     "verifier_verdict": verifier.get("verdict"),
@@ -450,16 +463,36 @@ def _agent_result_from_verifier_review(review: dict[str, Any], record: Annotatio
     )
 
 
-def _needs_arbiter(verifier_result: AgentResult, risk: RiskAssessment) -> bool:
+def _needs_arbiter(verifier_result: AgentResult, risk: RiskAssessment, record: AnnotationRecord) -> bool:
     if verifier_result.verdict in {"reject", "uncertain"}:
         return True
-    return risk.needs_verifier and verifier_result.verdict == "accept" and verifier_result.confidence == "low"
+    if not risk.needs_verifier or verifier_result.verdict != "accept":
+        return False
+    if verifier_result.confidence == "low":
+        return True
+    return _fragile_high_risk_pass_reason(record, risk, verifier_result) is not None
 
 
-def _arbiter_call_reason(verifier_result: AgentResult, risk: RiskAssessment) -> str:
+def _arbiter_call_reason(verifier_result: AgentResult, risk: RiskAssessment, record: AnnotationRecord) -> str:
     if verifier_result.verdict == "accept":
+        fragile_reason = _fragile_high_risk_pass_reason(record, risk, verifier_result)
+        if fragile_reason is not None:
+            return "High-risk Verifier pass lacks enough structured disambiguation for a short dialogue."
         return "High-risk Verifier pass has low confidence and needs structured arbitration."
     return "Verifier result conflicts with or cannot confirm the Labeler result."
+
+
+def _fragile_high_risk_pass_reason(
+    record: AnnotationRecord,
+    risk: RiskAssessment,
+    verifier_result: AgentResult,
+) -> Optional[str]:
+    if not risk.needs_verifier or verifier_result.verdict != "accept":
+        return None
+    signal_codes = set(_risk_signal_codes(risk))
+    if "no_rejected_candidates_for_short_dialogue" in signal_codes and not record.rejected_candidates:
+        return "short dialogue has no rejected speaker candidates"
+    return None
 
 
 def _agent_result_from_arbiter_decision(decision: dict[str, Any]) -> AgentResult:

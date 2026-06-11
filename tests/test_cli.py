@@ -66,7 +66,19 @@ class FakeTwoBatchClient:
             ),
             ChatResult(
                 content="",
-                tool_calls=[ToolCall(id="submit-2", name="submit_labels", arguments={"speakers": ["Holo"]})],
+                tool_calls=[
+                    ToolCall(
+                        id="submit-2",
+                        name="submit_labels",
+                        arguments={
+                            "speakers": ["Holo"],
+                            "evidence_lines": [2],
+                            "reason": "Line 2 names Holo as the speaker.",
+                            "rejected_candidates": ["Lawrence"],
+                            "confidence": "high",
+                        },
+                    )
+                ],
             ),
             VERIFIER_PASS,
         ]

@@ -24,6 +24,7 @@ from dialoop.quality import (
     summarize_annotations,
 )
 from dialoop.quality_cli import main
+from dialoop.quality_cli import safe_print
 
 
 ANSWER_TEXT = "\n".join(
@@ -550,6 +551,21 @@ class QualityTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Dialoop verifier false-pass report", stdout.getvalue())
         self.assertIn("high_risk_verifier_pass: 1", stdout.getvalue())
+
+    def test_safe_print_replaces_unencodable_console_characters(self) -> None:
+        class AsciiOnlyStdout(io.StringIO):
+            encoding = "ascii"
+
+            def write(self, text):
+                text.encode(self.encoding)
+                return super().write(text)
+
+        stdout = AsciiOnlyStdout()
+
+        with redirect_stdout(stdout):
+            safe_print("ok \u2022 value")
+
+        self.assertIn("ok ? value", stdout.getvalue())
 
 def annotation_row(
     *,

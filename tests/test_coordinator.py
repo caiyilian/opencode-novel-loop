@@ -124,6 +124,40 @@ class CoordinatorTest(unittest.TestCase):
         self.assertIn(("arbiter", "called"), [(event["agent"], event["action"]) for event in trace])
         self.assertIn(("arbiter", "uncertain"), [(event["agent"], event["action"]) for event in trace])
 
+    def test_short_dialogue_without_rejected_candidates_blocks_high_risk_verifier_pass(self) -> None:
+        verifier = FakeVerifierAgent(
+            VerifierReview(
+                enabled=True,
+                verdict="pass",
+                reason="Turn order seems plausible.",
+                counter_evidence_lines=[],
+                risk_signal_codes=["no_rejected_candidates_for_short_dialogue"],
+                confidence="high",
+            )
+        )
+
+        decision = Coordinator(verifier, verifier_mode="risk").review(
+            sample_record(rejected_candidates=[]),
+            RiskAssessment(
+                level="high",
+                signals=[
+                    RiskSignal(
+                        code="no_rejected_candidates_for_short_dialogue",
+                        message="Short dialogue lacks rejected candidates.",
+                        level="medium",
+                    )
+                ],
+            ),
+        )
+        trace = decision.trace_dicts()
+
+        self.assertTrue(decision.blocks_submission)
+        self.assertEqual(decision.verifier["verdict"], "pass")
+        self.assertEqual(decision.arbiter["decision"], "needs_more_evidence")
+        self.assertTrue(decision.arbiter["blocks_submission"])
+        self.assertIn("short dialogue has no rejected speaker candidates", decision.arbiter["reason"])
+        self.assertIn(("arbiter", "called"), [(event["agent"], event["action"]) for event in trace])
+
     def test_risk_mode_skips_verifier_for_low_risk_annotation(self) -> None:
         verifier = FakeVerifierAgent(
             VerifierReview(
