@@ -44,6 +44,8 @@ class VerifierTest(unittest.TestCase):
         self.assertIn('"verdict"', messages[1].content)
         self.assertIn('"confidence"', messages[1].content)
         self.assertIn('"risk"', messages[1].content)
+        self.assertIn("second-person dialogue", messages[1].content)
+        self.assertIn("no rejected candidates", messages[1].content)
 
     def test_review_from_payload_keeps_counter_evidence_lines(self) -> None:
         record = sample_record()

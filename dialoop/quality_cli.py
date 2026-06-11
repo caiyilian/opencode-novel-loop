@@ -212,7 +212,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 def run_evaluate(args: argparse.Namespace) -> int:
     report = evaluate_labels(answer_path=args.answers, labels_path=args.labels, novel_path=args.novel)
     max_errors = None if args.all_errors else args.max_errors
-    print(render_evaluation_report(report, max_errors=max_errors))
+    safe_print(render_evaluation_report(report, max_errors=max_errors))
     if args.error_output is not None:
         args.error_output.parent.mkdir(parents=True, exist_ok=True)
         args.error_output.write_text(render_error_labels(report), encoding="utf-8")
@@ -223,19 +223,19 @@ def run_scan_terms(args: argparse.Namespace) -> int:
     paths = args.paths or list(DEFAULT_SCAN_PATHS)
     terms = load_terms(terms=args.terms, terms_file=args.terms_file)
     matches = scan_terms(paths, terms)
-    print(render_term_scan_report(matches, terms, paths))
+    safe_print(render_term_scan_report(matches, terms, paths))
     return 1 if matches else 0
 
 
 def run_annotations_summary(args: argparse.Namespace) -> int:
     summary = summarize_annotations(args.annotations)
-    print(render_annotation_summary(summary, show_problems=args.show_problems))
+    safe_print(render_annotation_summary(summary, show_problems=args.show_problems))
     return 1 if summary.has_structural_errors else 0
 
 
 def run_coordinator_trace(args: argparse.Namespace) -> int:
     audit = audit_coordinator_trace(args.annotations, verifier_mode=args.verifier_mode)
-    print(render_coordinator_trace_audit(audit, show_problems=args.show_problems))
+    safe_print(render_coordinator_trace_audit(audit, show_problems=args.show_problems))
     return 0 if audit.passed else 1
 
 
@@ -247,7 +247,7 @@ def run_mismatch_attribution(args: argparse.Namespace) -> int:
         novel_path=args.novel,
     )
     max_errors = None if args.all_errors else args.max_errors
-    print(render_mismatch_attribution_report(report, max_errors=max_errors))
+    safe_print(render_mismatch_attribution_report(report, max_errors=max_errors))
     return 0
 
 
@@ -259,8 +259,17 @@ def run_verifier_false_pass(args: argparse.Namespace) -> int:
         novel_path=args.novel,
     )
     max_errors = None if args.all_errors else args.max_errors
-    print(render_verifier_false_pass_report(report, max_errors=max_errors))
+    safe_print(render_verifier_false_pass_report(report, max_errors=max_errors))
     return 0
+
+
+def safe_print(text: str) -> None:
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe_text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe_text)
 
 
 def evaluate_main(argv: Optional[Sequence[str]] = None) -> int:
