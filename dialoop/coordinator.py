@@ -176,6 +176,7 @@ class StructuredArbiterAgent:
                 "counter_evidence_lines": [],
                 "reason": f"High-risk verifier pass needs stronger disambiguation before writing: {fragile_reason}",
                 "confidence": "low",
+                "block_reason_code": "fragile_high_risk_pass",
                 "blocks_submission": True,
             }
         if risk.needs_verifier and verifier_result.verdict == "accept" and verifier_result.confidence == "low":
