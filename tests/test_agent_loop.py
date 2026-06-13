@@ -341,6 +341,79 @@ class AgentLoopTest(unittest.TestCase):
                 annotation["recovery"]["blocked_reviews"][0]["arbiter"]["reason"],
             )
 
+    def test_repeated_fragile_verifier_block_unblocks_after_one_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
+            text = "Holo answered: \u300c\u55ef\uff1f\u300d"
+            tools = DialoopLocalTools(DialogueIndex.from_text(text), LabelStore(labels), batch_size=1)
+            fragile_pass = ChatResult(
+                content=(
+                    '{"verdict":"pass","reason":"Turn order seems plausible.",'
+                    '"counter_evidence_lines":[],"confidence":"high"}'
+                )
+            )
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 1},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="first-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Holo"]},
+                            )
+                        ],
+                    ),
+                    fragile_pass,
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="repeat-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Holo"]},
+                            )
+                        ],
+                    ),
+                    fragile_pass,
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=4, verifier_mode="risk"),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            annotation = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(result.tool_steps, 3)
+            self.assertEqual(LabelStore(labels).labels(), ["Holo"])
+            self.assertEqual(result.tool_history[1].result["accepted"], False)
+            self.assertEqual(result.tool_history[2].result["accepted"], True)
+            self.assertEqual(
+                annotation["recovery"]["blocked_reviews"][0]["arbiter"]["block_reason_code"],
+                "fragile_high_risk_pass",
+            )
+            self.assertFalse(annotation["arbiter"]["blocks_submission"])
+            self.assertTrue(annotation["arbiter"]["unblocked_after_repeated_review"])
+            self.assertIn(
+                ("arbiter", "unblocked"),
+                [(event["agent"], event["action"]) for event in annotation["coordinator_trace"]],
+            )
+
     def test_agent_writes_multi_dialogue_annotations_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             labels = Path(directory) / "labels.txt"
