@@ -12,7 +12,7 @@ from dialoop.cli import main
 from dialoop.model_client import ChatResult, ToolCall
 
 
-VERIFIER_PASS = ChatResult(content='{"verdict":"pass","reason":"ok","counter_evidence_lines":[]}')
+VERIFIER_PASS = ChatResult(content='{"verdict":"pass","reason":"ok","counter_evidence_lines":[],"confidence":"high"}')
 
 
 class FakeOpenAICompatibleClient:
@@ -66,7 +66,19 @@ class FakeTwoBatchClient:
             ),
             ChatResult(
                 content="",
-                tool_calls=[ToolCall(id="submit-2", name="submit_labels", arguments={"speakers": ["Holo"]})],
+                tool_calls=[
+                    ToolCall(
+                        id="submit-2",
+                        name="submit_labels",
+                        arguments={
+                            "speakers": ["Holo"],
+                            "evidence_lines": [2],
+                            "reason": "Line 2 names Holo as the speaker.",
+                            "rejected_candidates": ["Lawrence"],
+                            "confidence": "high",
+                        },
+                    )
+                ],
             ),
             VERIFIER_PASS,
         ]
@@ -235,6 +247,37 @@ class CliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["speaker"], "Lawrence")
+        self.assertIn("annotations_written: 1", stdout.getvalue())
+
+    def test_reset_output_truncates_stale_labels_before_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            novel_path = Path(temp_dir) / "novel.txt"
+            output_path = Path(temp_dir) / "labels.txt"
+            annotations_path = Path(temp_dir) / "annotations.jsonl"
+            novel_path.write_text("Lawrence said: \u300cHello.\u300d\n", encoding="utf-8")
+            output_path.write_text("stale speaker\n", encoding="utf-8")
+            annotations_path.write_text("{}\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with patch("dialoop.cli.OpenAICompatibleClient", FakeOpenAICompatibleClient):
+                with redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            str(novel_path),
+                            "--output",
+                            str(output_path),
+                            "--reset-output",
+                            "--annotations-output",
+                            str(annotations_path),
+                            "--reset-annotations",
+                        ]
+                    )
+            labels_text = output_path.read_text(encoding="utf-8")
+            rows = [json.loads(line) for line in annotations_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(labels_text, "Lawrence\n")
+        self.assertEqual(len(rows), 1)
         self.assertIn("annotations_written: 1", stdout.getvalue())
 
     def test_show_prompt_prints_prompt_to_stdout(self) -> None:

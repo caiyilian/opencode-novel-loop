@@ -1,11 +1,12 @@
 python -m dialoop.cli novel.txt \
   --output labeled_test.txt \
+  --reset-output \
   --annotations-output .dialoop/annotations.jsonl \
   --batch-size 1 \
   --max-tool-steps 20 \
   --max-iterations 1349 \
   --protocol auto \
-  --base-url http://172.31.102.162:11434/v1 \
+  --base-url http://172.31.102.237:11434/v1 \
   --api-key ollama \
   --model qwen3:32b \
   --model-timeout 360 \

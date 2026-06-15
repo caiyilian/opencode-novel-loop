@@ -19,6 +19,7 @@ dialoop-evaluate = "dialoop.quality_cli:evaluate_main"
 dialoop-scan-terms = "dialoop.quality_cli:scan_terms_main"
 dialoop-annotations-summary = "dialoop.quality_cli:annotations_summary_main"
 dialoop-mismatch-attribution = "dialoop.quality_cli:mismatch_attribution_main"
+dialoop-verifier-false-pass = "dialoop.quality_cli:verifier_false_pass_main"
 
 [tool.setuptools]
 packages = ["dialoop"]
