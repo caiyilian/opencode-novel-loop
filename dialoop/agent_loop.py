@@ -230,10 +230,12 @@ class AgentRunner:
         )
         self._used_context_tool = False
         self._used_identity_lookup_tool = False
+        self._blocked_review_attempts: list[dict[str, Any]] = []
 
     def run_one_batch(self) -> AgentBatchResult:
         self._used_context_tool = False
         self._used_identity_lookup_tool = False
+        self._blocked_review_attempts = []
         initial_batch = self.tools.get_next_dialogue()
         if initial_batch["done"]:
             return AgentBatchResult(
@@ -486,7 +488,10 @@ class AgentRunner:
                 speakers=speakers,
                 submit_args=accepted_submit.arguments,
                 tool_summary=summarize_tool_history(history),
-                recovery=submit_recovery_info(accepted_submit.result),
+                recovery=submit_recovery_info(
+                    accepted_submit.result,
+                    blocked_reviews=self._blocked_review_attempts,
+                ),
             )
             records = self._review_annotation_records(records)
             blocking_review = first_blocking_verifier_review(records)
@@ -521,11 +526,17 @@ class AgentRunner:
         for record in records:
             risk = assess_annotation_risk(record)
             decision = self.coordinator.review(record, risk)
+            arbiter = decision.arbiter
+            trace = decision.trace_dicts()
+            if repeated_fragile_review_block(record, arbiter, self._blocked_review_attempts):
+                arbiter = unblock_repeated_fragile_arbiter(arbiter)
+                trace.append(repeated_fragile_unblock_trace_event(len(trace) + 1, arbiter))
             reviewed.append(
                 record.with_review(
                     risk=decision.risk,
                     verifier=decision.verifier,
-                    coordinator_trace=decision.trace_dicts(),
+                    arbiter=arbiter,
+                    coordinator_trace=trace,
                 )
             )
         return reviewed
@@ -539,6 +550,9 @@ class AgentRunner:
         accepted_submit.result["pending_review"] = False
         accepted_submit.result["error"] = "verifier rejected the submitted speaker before label write"
         accepted_submit.result["verifier"] = review
+        if isinstance(review.get("arbiter"), dict):
+            accepted_submit.result["arbiter"] = review["arbiter"]
+        self._blocked_review_attempts.append(blocked_review_attempt(review))
 
     def _execute_submit_labels(self, args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -722,23 +736,123 @@ def summarize_tool_history(history: list[ToolExecution]) -> dict[str, Any]:
     return summary
 
 
-def submit_recovery_info(result: dict[str, Any]) -> Optional[dict[str, Any]]:
+def submit_recovery_info(
+    result: dict[str, Any],
+    blocked_reviews: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
     recovery = {
         key: result[key]
         for key in ("warning", "expected_count", "received_count", "ignored_speakers")
         if key in result
     }
+    if blocked_reviews:
+        recovery["blocked_reviews"] = [dict(review) for review in blocked_reviews]
     return recovery or None
+
+
+def blocked_review_attempt(review: dict[str, Any]) -> dict[str, Any]:
+    data = {
+        key: review[key]
+        for key in ("index", "line_number", "speaker", "verdict", "reason", "risk_signal_codes")
+        if key in review
+    }
+    arbiter = review.get("arbiter")
+    if isinstance(arbiter, dict):
+        data["arbiter"] = {
+            key: arbiter[key]
+            for key in (
+                "decision",
+                "verdict",
+                "reason",
+                "blocks_submission",
+                "confidence",
+                "block_reason_code",
+            )
+            if key in arbiter
+        }
+    return data
+
+
+def repeated_fragile_review_block(
+    record: Any,
+    arbiter: Optional[dict[str, Any]],
+    blocked_attempts: list[dict[str, Any]],
+) -> bool:
+    if not is_fragile_review_block(arbiter):
+        return False
+    for attempt in blocked_attempts:
+        if attempt.get("index") != record.index:
+            continue
+        if attempt.get("line_number") != record.line_number:
+            continue
+        if attempt.get("speaker") != record.speaker:
+            continue
+        if is_fragile_review_block(attempt.get("arbiter")):
+            return True
+    return False
+
+
+def is_fragile_review_block(arbiter: Any) -> bool:
+    if not isinstance(arbiter, dict):
+        return False
+    if arbiter.get("blocks_submission") is not True:
+        return False
+    if arbiter.get("decision") != "needs_more_evidence":
+        return False
+    if arbiter.get("block_reason_code") == "fragile_high_risk_pass":
+        return True
+    reason = arbiter.get("reason")
+    return isinstance(reason, str) and "short dialogue has no rejected speaker candidates" in reason
+
+
+def unblock_repeated_fragile_arbiter(arbiter: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not isinstance(arbiter, dict):
+        return arbiter
+    unblocked = dict(arbiter)
+    unblocked["blocks_submission"] = False
+    unblocked["unblocked_after_repeated_review"] = True
+    unblocked["unblock_reason"] = (
+        "Repeated fragile verifier block for the same dialogue and speaker; "
+        "allow progress after one retry while preserving the blocked review in recovery."
+    )
+    return unblocked
+
+
+def repeated_fragile_unblock_trace_event(step: int, arbiter: Optional[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "step": step,
+        "agent": "arbiter",
+        "action": "unblocked",
+        "reason": (
+            "Repeated fragile verifier block matched a previous blocked review; "
+            "submission was allowed to avoid a retry loop."
+        ),
+        "metadata": {
+            "block_reason_code": "fragile_high_risk_pass",
+            "arbiter_decision": arbiter.get("decision") if isinstance(arbiter, dict) else None,
+        },
+    }
 
 
 def first_blocking_verifier_review(records: list[Any]) -> Optional[dict[str, Any]]:
     for record in records:
         verifier = record.verifier
+        arbiter = getattr(record, "arbiter", None)
+        if isinstance(arbiter, dict) and arbiter.get("blocks_submission") is True:
+            review = dict(verifier) if isinstance(verifier, dict) else {}
+            return {
+                **review,
+                "arbiter": arbiter,
+                "index": record.index,
+                "line_number": record.line_number,
+                "speaker": record.speaker,
+            }
         if not isinstance(verifier, dict):
             continue
         if verifier.get("enabled") is True and verifier.get("verdict") == "fail":
             return {
                 **verifier,
+                "arbiter": arbiter if isinstance(arbiter, dict) else None,
                 "index": record.index,
                 "line_number": record.line_number,
                 "speaker": record.speaker,
@@ -751,13 +865,26 @@ def verifier_retry_message(review: dict[str, Any]) -> str:
     if not isinstance(risk_codes, list):
         risk_codes = []
     reason = review.get("reason") if isinstance(review.get("reason"), str) else "no reason"
+    arbiter = review.get("arbiter") if isinstance(review.get("arbiter"), dict) else {}
+    arbiter_reason = arbiter.get("reason") if isinstance(arbiter.get("reason"), str) else None
+    arbiter_text = f" Arbiter reason: {arbiter_reason}." if arbiter_reason else ""
+    fragile_instruction = ""
+    if arbiter.get("block_reason_code") == "fragile_high_risk_pass" or (
+        isinstance(arbiter_reason, str) and "short dialogue has no rejected speaker candidates" in arbiter_reason
+    ):
+        fragile_instruction = (
+            " For this short dialogue, do not repeat the same bare submit_labels call. "
+            "If the same speaker is still best, resubmit with evidence_lines, reason, "
+            "rejected_candidates comparing at least one plausible alternative speaker, and confidence."
+        )
     return (
         "Verifier rejected the submitted label before writing it to the output file. "
         f"Dialogue index={review.get('index')} line={review.get('line_number')} "
         f"speaker={review.get('speaker')} was not accepted. "
-        f"Verifier reason: {reason}. "
+        f"Verifier reason: {reason}.{arbiter_text} "
         f"Risk signals: {', '.join(str(code) for code in risk_codes) or 'none'}. "
         "Read or search more context if needed, then call submit_labels again with a corrected speaker."
+        f"{fragile_instruction}"
     )
 
 

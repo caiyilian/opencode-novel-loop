@@ -61,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path for speaker labels. Relative paths resolve from the novel directory.",
     )
     parser.add_argument(
+        "--reset-output",
+        action="store_true",
+        help="Truncate the speaker label output before starting a labeling run.",
+    )
+    parser.add_argument(
         "--annotations-output",
         type=Path,
         default=Path(".dialoop") / "annotations.jsonl",
@@ -269,6 +274,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(render_model_report(model_config, protocol=args.protocol, check_model=args.check_model))
         return 0
 
+    if args.reset_output:
+        reset_output_for_run(config.output_path)
+
     tools = DialoopLocalTools.from_paths(
         novel_path=config.novel_path,
         labels_path=config.output_path,
@@ -365,6 +373,11 @@ def prepare_annotations_for_run(
         "Clear the annotations file, choose a different --annotations-output path, or pass "
         "--reset-annotations when intentionally starting a fresh annotation run."
     )
+
+
+def reset_output_for_run(output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("", encoding="utf-8")
 
 
 def count_annotation_records(annotations_path: Path) -> int:

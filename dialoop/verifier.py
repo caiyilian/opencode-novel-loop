@@ -19,12 +19,15 @@ class VerifierReview:
     reason: str
     counter_evidence_lines: list[int]
     risk_signal_codes: list[str]
+    confidence: str = "medium"
     raw: Optional[str] = None
     error: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.verdict not in VERIFIER_VERDICTS:
             raise ValueError(f"unsupported verifier verdict: {self.verdict}")
+        if self.confidence not in {"high", "medium", "low"}:
+            raise ValueError(f"unsupported verifier confidence: {self.confidence}")
 
     @property
     def blocks_submission(self) -> bool:
@@ -37,6 +40,7 @@ class VerifierReview:
             "reason": self.reason,
             "counter_evidence_lines": self.counter_evidence_lines,
             "risk_signal_codes": self.risk_signal_codes,
+            "confidence": self.confidence,
         }
         if self.raw is not None:
             data["raw"] = self.raw
@@ -118,7 +122,12 @@ def verifier_messages(record: AnnotationRecord, risk: RiskAssessment) -> list[Ch
             "Do not relabel the dialogue from scratch.",
             "Look only for counter-evidence, turn-order conflicts, addressee/speaker confusion, or insufficient evidence.",
             "Return verdict=fail only when the submitted speaker is not supported.",
+            "Return verdict=pass only when the evidence directly supports the submitted speaker and no plausible counter-evidence remains.",
             "Return verdict=uncertain when evidence is weak but no clear counter-evidence is found.",
+            "For second-person dialogue, verify who is speaking and who is being addressed; do not pass from pronouns alone.",
+            "For very short dialogue with no rejected candidates, return uncertain unless at least one plausible alternative speaker was compared.",
+            "Turn order, speaking style, or conversational flow alone is not enough for a high-confidence pass on high-risk samples.",
+            "Use confidence=high only when the verifier conclusion is strongly supported by explicit evidence.",
             "Keep reason short: at most 80 Chinese characters or one short English sentence.",
         ],
         "annotation": {
@@ -136,6 +145,7 @@ def verifier_messages(record: AnnotationRecord, risk: RiskAssessment) -> list[Ch
             "verdict": "pass | fail | uncertain",
             "reason": "short explanation",
             "counter_evidence_lines": [1],
+            "confidence": "high | medium | low",
         },
     }
     return [
@@ -167,7 +177,8 @@ def verifier_retry_messages(raw: Optional[str], error: str) -> list[ChatMessage]
                 "The previous verifier response was not usable JSON.\n"
                 f"Error: {error}\n"
                 f"Previous response: {previous[:600]}\n"
-                'Return only this shape: {"verdict":"pass|fail|uncertain","reason":"short","counter_evidence_lines":[]}'
+                'Return only this shape: {"verdict":"pass|fail|uncertain","reason":"short",'
+                '"counter_evidence_lines":[],"confidence":"high|medium|low"}.'
             ),
         ),
     ]
@@ -181,6 +192,7 @@ def review_from_payload(payload: Any, risk: RiskAssessment, raw: Optional[str] =
             reason="Verifier JSON payload was not an object.",
             counter_evidence_lines=[],
             risk_signal_codes=_risk_signal_codes(risk),
+            confidence="low",
             raw=raw,
         )
 
@@ -191,6 +203,7 @@ def review_from_payload(payload: Any, risk: RiskAssessment, raw: Optional[str] =
         reason=_string_value(payload.get("reason"), default="Verifier did not provide a reason."),
         counter_evidence_lines=_line_numbers(payload.get("counter_evidence_lines")),
         risk_signal_codes=_risk_signal_codes(risk),
+        confidence=_confidence(payload.get("confidence")),
         raw=raw,
     )
 
@@ -205,6 +218,12 @@ def _string_value(value: Any, default: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return default
+
+
+def _confidence(value: Any) -> str:
+    if isinstance(value, str) and value.strip().lower() in {"high", "medium", "low"}:
+        return value.strip().lower()
+    return "low"
 
 
 def _line_numbers(value: Any) -> list[int]:
@@ -236,6 +255,7 @@ def _error_review(
         reason=reason,
         counter_evidence_lines=[],
         risk_signal_codes=_risk_signal_codes(risk),
+        confidence="low",
         raw=raw,
         error=error,
     )

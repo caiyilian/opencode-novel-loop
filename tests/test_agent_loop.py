@@ -177,7 +177,12 @@ class AgentLoopTest(unittest.TestCase):
                             )
                         ],
                     ),
-                    ChatResult(content='{"verdict":"pass","reason":"Evidence is enough.","counter_evidence_lines":[]}'),
+                    ChatResult(
+                        content=(
+                            '{"verdict":"pass","reason":"Evidence is enough.",'
+                            '"counter_evidence_lines":[],"confidence":"high"}'
+                        )
+                    ),
                 ]
             )
 
@@ -200,6 +205,66 @@ class AgentLoopTest(unittest.TestCase):
                 [(event["agent"], event["action"]) for event in annotation["coordinator_trace"]],
             )
             self.assertEqual(annotation["coordinator_trace"][-1]["result"]["verdict"], "accept")
+
+    def test_verifier_uncertain_records_arbiter_review_in_annotations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-submit",
+                                name="submit_labels",
+                                arguments={
+                                    "speakers": ["Lawrence"],
+                                    "evidence_lines": [1],
+                                    "reason": "Short line requires turn context.",
+                                    "confidence": "low",
+                                },
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content=(
+                            '{"verdict":"uncertain","reason":"Evidence is weak.",'
+                            '"counter_evidence_lines":[],"confidence":"low"}'
+                        )
+                    ),
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=3, verifier_mode="risk"),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            annotation = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
+            self.assertEqual(annotation["verifier"]["verdict"], "uncertain")
+            self.assertEqual(annotation["verifier"]["confidence"], "low")
+            self.assertEqual(annotation["arbiter"]["decision"], "needs_more_evidence")
+            self.assertIn("Evidence is weak", annotation["arbiter"]["reason"])
+            self.assertIn(
+                ("arbiter", "uncertain"),
+                [(event["agent"], event["action"]) for event in annotation["coordinator_trace"]],
+            )
 
     def test_verifier_failure_blocks_write_and_requests_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -244,7 +309,12 @@ class AgentLoopTest(unittest.TestCase):
                             )
                         ],
                     ),
-                    ChatResult(content='{"verdict":"pass","reason":"Retry is supported.","counter_evidence_lines":[]}'),
+                    ChatResult(
+                        content=(
+                            '{"verdict":"pass","reason":"Retry is supported.",'
+                            '"counter_evidence_lines":[],"confidence":"high"}'
+                        )
+                    ),
                 ]
             )
 
@@ -261,8 +331,88 @@ class AgentLoopTest(unittest.TestCase):
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
             self.assertEqual(result.tool_history[1].result["accepted"], False)
             self.assertIn("verifier rejected", result.tool_history[1].result["error"])
+            self.assertEqual(result.tool_history[1].result["arbiter"]["decision"], "reject_labeler")
+            self.assertIn("Verifier rejected", result.tool_history[1].result["arbiter"]["reason"])
             self.assertEqual(annotation["speaker"], "Lawrence")
             self.assertEqual(annotation["verifier"]["verdict"], "pass")
+            self.assertEqual(annotation["recovery"]["blocked_reviews"][0]["arbiter"]["decision"], "reject_labeler")
+            self.assertIn(
+                "Verifier rejected",
+                annotation["recovery"]["blocked_reviews"][0]["arbiter"]["reason"],
+            )
+
+    def test_repeated_fragile_verifier_block_unblocks_after_one_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
+            text = "Holo answered: \u300c\u55ef\uff1f\u300d"
+            tools = DialoopLocalTools(DialogueIndex.from_text(text), LabelStore(labels), batch_size=1)
+            fragile_pass = ChatResult(
+                content=(
+                    '{"verdict":"pass","reason":"Turn order seems plausible.",'
+                    '"counter_evidence_lines":[],"confidence":"high"}'
+                )
+            )
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 1},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="first-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Holo"]},
+                            )
+                        ],
+                    ),
+                    fragile_pass,
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="repeat-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Holo"]},
+                            )
+                        ],
+                    ),
+                    fragile_pass,
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=4, verifier_mode="risk"),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            annotation = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
+
+            self.assertTrue(result.submitted)
+            self.assertEqual(result.tool_steps, 3)
+            self.assertEqual(LabelStore(labels).labels(), ["Holo"])
+            self.assertEqual(result.tool_history[1].result["accepted"], False)
+            self.assertEqual(result.tool_history[2].result["accepted"], True)
+            self.assertEqual(
+                annotation["recovery"]["blocked_reviews"][0]["arbiter"]["block_reason_code"],
+                "fragile_high_risk_pass",
+            )
+            self.assertFalse(annotation["arbiter"]["blocks_submission"])
+            self.assertTrue(annotation["arbiter"]["unblocked_after_repeated_review"])
+            self.assertIn(
+                ("arbiter", "unblocked"),
+                [(event["agent"], event["action"]) for event in annotation["coordinator_trace"]],
+            )
 
     def test_agent_writes_multi_dialogue_annotations_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

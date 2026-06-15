@@ -78,7 +78,7 @@ DEFAULT_AGENT_SPECS: dict[str, AgentSpec] = {
     ),
     "arbiter": AgentSpec(
         agent="arbiter",
-        prompt_constructor="deterministic_tool:arbitrate_identity",
+        prompt_constructor="dialoop.coordinator.StructuredArbiterAgent.arbitrate",
         context_budget_tokens=0,
     ),
 }
@@ -115,6 +115,92 @@ class AgentResult:
             "counter_evidence_lines": list(self.counter_evidence_lines or []),
             "reason": self.reason,
             "confidence": self.confidence,
+        }
+
+
+class ArbiterLike(Protocol):
+    def arbitrate(
+        self,
+        *,
+        labeler_result: AgentResult,
+        verifier_result: AgentResult,
+        verifier_review: dict[str, Any],
+        record: AnnotationRecord,
+        risk: RiskAssessment,
+    ) -> dict[str, Any]:
+        ...
+
+
+class StructuredArbiterAgent:
+    def arbitrate(
+        self,
+        *,
+        labeler_result: AgentResult,
+        verifier_result: AgentResult,
+        verifier_review: dict[str, Any],
+        record: AnnotationRecord,
+        risk: RiskAssessment,
+    ) -> dict[str, Any]:
+        if verifier_result.verdict == "reject":
+            return {
+                "enabled": True,
+                "decision": "reject_labeler",
+                "verdict": "reject",
+                "recommended_speaker": None,
+                "evidence_lines": list(labeler_result.evidence_lines or []),
+                "counter_evidence_lines": list(verifier_result.counter_evidence_lines or []),
+                "reason": f"Verifier rejected the labeler speaker: {verifier_result.reason}",
+                "confidence": verifier_result.confidence,
+                "blocks_submission": True,
+            }
+        if verifier_result.verdict == "uncertain":
+            return {
+                "enabled": True,
+                "decision": "needs_more_evidence",
+                "verdict": "uncertain",
+                "recommended_speaker": record.speaker,
+                "evidence_lines": list(labeler_result.evidence_lines or []),
+                "counter_evidence_lines": list(verifier_result.counter_evidence_lines or []),
+                "reason": f"Verifier could not fully confirm the labeler evidence: {verifier_result.reason}",
+                "confidence": "low",
+                "blocks_submission": False,
+            }
+        fragile_reason = _fragile_high_risk_pass_reason(record, risk, verifier_result)
+        if fragile_reason is not None:
+            return {
+                "enabled": True,
+                "decision": "needs_more_evidence",
+                "verdict": "uncertain",
+                "recommended_speaker": record.speaker,
+                "evidence_lines": list(labeler_result.evidence_lines or []),
+                "counter_evidence_lines": [],
+                "reason": f"High-risk verifier pass needs stronger disambiguation before writing: {fragile_reason}",
+                "confidence": "low",
+                "block_reason_code": "fragile_high_risk_pass",
+                "blocks_submission": True,
+            }
+        if risk.needs_verifier and verifier_result.verdict == "accept" and verifier_result.confidence == "low":
+            return {
+                "enabled": True,
+                "decision": "needs_more_evidence",
+                "verdict": "uncertain",
+                "recommended_speaker": record.speaker,
+                "evidence_lines": list(labeler_result.evidence_lines or []),
+                "counter_evidence_lines": [],
+                "reason": "High-risk verifier pass had low confidence; require stronger evidence before writing.",
+                "confidence": "low",
+                "blocks_submission": True,
+            }
+        return {
+            "enabled": True,
+            "decision": "accept_labeler",
+            "verdict": "accept",
+            "recommended_speaker": record.speaker,
+            "evidence_lines": list(labeler_result.evidence_lines or []),
+            "counter_evidence_lines": [],
+            "reason": "Verifier did not conflict with the labeler speaker.",
+            "confidence": verifier_review.get("confidence", "medium"),
+            "blocks_submission": False,
         }
 
 
@@ -155,10 +241,13 @@ class CoordinatorTraceEvent:
 class CoordinatorDecision:
     risk: dict[str, Any]
     verifier: Optional[dict[str, Any]]
+    arbiter: Optional[dict[str, Any]]
     trace: list[CoordinatorTraceEvent]
 
     @property
     def blocks_submission(self) -> bool:
+        if isinstance(self.arbiter, dict) and self.arbiter.get("blocks_submission") is True:
+            return True
         return (
             isinstance(self.verifier, dict)
             and self.verifier.get("enabled") is True
@@ -173,6 +262,7 @@ class Coordinator:
     def __init__(
         self,
         verifier_agent: Optional[VerifierLike] = None,
+        arbiter_agent: Optional[ArbiterLike] = None,
         verifier_mode: str = "off",
         verifier_context_budget: int = 1200,
         agent_specs: Optional[dict[str, AgentSpec]] = None,
@@ -180,6 +270,7 @@ class Coordinator:
         if verifier_mode not in {"off", "risk", "all"}:
             raise ValueError(f"unsupported verifier_mode: {verifier_mode}")
         self.verifier_agent = verifier_agent
+        self.arbiter_agent = arbiter_agent or StructuredArbiterAgent()
         self.verifier_mode = verifier_mode
         self.agent_specs = dict(DEFAULT_AGENT_SPECS if agent_specs is None else agent_specs)
         self.agent_specs["verifier"] = replace(
@@ -189,28 +280,31 @@ class Coordinator:
 
     def review(self, record: AnnotationRecord, risk: RiskAssessment) -> CoordinatorDecision:
         trace: list[CoordinatorTraceEvent] = []
-        self._append_labeler_result(trace, record)
+        labeler_result = self._append_labeler_result(trace, record)
         self._append_observed_tool_results(trace, record)
-        verifier = self._maybe_call_verifier(trace, record, risk)
-        return CoordinatorDecision(risk=risk.to_dict(), verifier=verifier, trace=trace)
+        verifier, verifier_result = self._maybe_call_verifier(trace, record, risk)
+        arbiter = self._maybe_call_arbiter(trace, record, risk, labeler_result, verifier, verifier_result)
+        return CoordinatorDecision(risk=risk.to_dict(), verifier=verifier, arbiter=arbiter, trace=trace)
 
-    def _append_labeler_result(self, trace: list[CoordinatorTraceEvent], record: AnnotationRecord) -> None:
+    def _append_labeler_result(self, trace: list[CoordinatorTraceEvent], record: AnnotationRecord) -> AgentResult:
+        result = AgentResult(
+            agent="labeler",
+            verdict="accept",
+            recommended_speaker=record.speaker,
+            evidence_lines=record.evidence_lines,
+            reason=record.reason,
+            confidence=record.confidence,
+        )
         trace.append(
             CoordinatorTraceEvent(
                 step=len(trace) + 1,
                 agent="labeler",
                 action="accepted",
                 reason="Labeler submitted a speaker candidate for coordinator review.",
-                result=AgentResult(
-                    agent="labeler",
-                    verdict="accept",
-                    recommended_speaker=record.speaker,
-                    evidence_lines=record.evidence_lines,
-                    reason=record.reason,
-                    confidence=record.confidence,
-                ),
+                result=result,
             )
         )
+        return result
 
     def _append_observed_tool_results(self, trace: list[CoordinatorTraceEvent], record: AnnotationRecord) -> None:
         tool_summary = record.tool_summary if isinstance(record.tool_summary, dict) else {}
@@ -248,7 +342,7 @@ class Coordinator:
         trace: list[CoordinatorTraceEvent],
         record: AnnotationRecord,
         risk: RiskAssessment,
-    ) -> Optional[dict[str, Any]]:
+    ) -> tuple[Optional[dict[str, Any]], Optional[AgentResult]]:
         if self.verifier_agent is None or self.verifier_mode == "off":
             trace.append(
                 CoordinatorTraceEvent(
@@ -259,7 +353,7 @@ class Coordinator:
                     metadata={"verifier_mode": self.verifier_mode},
                 )
             )
-            return None
+            return None, None
         if self.verifier_mode == "risk" and not risk.needs_verifier:
             trace.append(
                 CoordinatorTraceEvent(
@@ -274,7 +368,7 @@ class Coordinator:
                     },
                 )
             )
-            return None
+            return None, None
 
         trace.append(
             CoordinatorTraceEvent(
@@ -301,7 +395,53 @@ class Coordinator:
                 result=result,
             )
         )
-        return review
+        return review, result
+
+    def _maybe_call_arbiter(
+        self,
+        trace: list[CoordinatorTraceEvent],
+        record: AnnotationRecord,
+        risk: RiskAssessment,
+        labeler_result: AgentResult,
+        verifier: Optional[dict[str, Any]],
+        verifier_result: Optional[AgentResult],
+    ) -> Optional[dict[str, Any]]:
+        if verifier is None or verifier_result is None:
+            return None
+        if not _needs_arbiter(verifier_result, risk, record):
+            return None
+
+        trace.append(
+            CoordinatorTraceEvent(
+                step=len(trace) + 1,
+                agent="arbiter",
+                action="called",
+                reason=_arbiter_call_reason(verifier_result, risk, record),
+                metadata={
+                    "agent_spec": self.agent_specs["arbiter"].to_dict(),
+                    "verifier_verdict": verifier.get("verdict"),
+                    "verifier_confidence": verifier.get("confidence"),
+                },
+            )
+        )
+        decision = self.arbiter_agent.arbitrate(
+            labeler_result=labeler_result,
+            verifier_result=verifier_result,
+            verifier_review=verifier,
+            record=record,
+            risk=risk,
+        )
+        result = _agent_result_from_arbiter_decision(decision)
+        trace.append(
+            CoordinatorTraceEvent(
+                step=len(trace) + 1,
+                agent="arbiter",
+                action=_arbiter_trace_action(result.verdict),
+                reason=result.reason,
+                result=result,
+            )
+        )
+        return decision
 
 
 def _agent_result_from_verifier_review(review: dict[str, Any], record: AnnotationRecord) -> AgentResult:
@@ -312,7 +452,7 @@ def _agent_result_from_verifier_review(review: dict[str, Any], record: Annotatio
         "uncertain": "uncertain",
         "error": "uncertain",
     }.get(verdict, "uncertain")
-    confidence = "low" if verdict == "error" else "medium"
+    confidence = _confidence(review.get("confidence"), default="low" if verdict == "error" else "medium")
     return AgentResult(
         agent="verifier",
         verdict=mapped_verdict,
@@ -321,6 +461,53 @@ def _agent_result_from_verifier_review(review: dict[str, Any], record: Annotatio
         counter_evidence_lines=_line_numbers(review.get("counter_evidence_lines")),
         reason=_optional_string(review.get("reason")) or "Verifier did not provide a reason.",
         confidence=confidence,
+    )
+
+
+def _needs_arbiter(verifier_result: AgentResult, risk: RiskAssessment, record: AnnotationRecord) -> bool:
+    if verifier_result.verdict in {"reject", "uncertain"}:
+        return True
+    if not risk.needs_verifier or verifier_result.verdict != "accept":
+        return False
+    if verifier_result.confidence == "low":
+        return True
+    return _fragile_high_risk_pass_reason(record, risk, verifier_result) is not None
+
+
+def _arbiter_call_reason(verifier_result: AgentResult, risk: RiskAssessment, record: AnnotationRecord) -> str:
+    if verifier_result.verdict == "accept":
+        fragile_reason = _fragile_high_risk_pass_reason(record, risk, verifier_result)
+        if fragile_reason is not None:
+            return "High-risk Verifier pass lacks enough structured disambiguation for a short dialogue."
+        return "High-risk Verifier pass has low confidence and needs structured arbitration."
+    return "Verifier result conflicts with or cannot confirm the Labeler result."
+
+
+def _fragile_high_risk_pass_reason(
+    record: AnnotationRecord,
+    risk: RiskAssessment,
+    verifier_result: AgentResult,
+) -> Optional[str]:
+    if not risk.needs_verifier or verifier_result.verdict != "accept":
+        return None
+    signal_codes = set(_risk_signal_codes(risk))
+    if "no_rejected_candidates_for_short_dialogue" in signal_codes and not record.rejected_candidates:
+        return "short dialogue has no rejected speaker candidates"
+    return None
+
+
+def _agent_result_from_arbiter_decision(decision: dict[str, Any]) -> AgentResult:
+    verdict = _optional_string(decision.get("verdict")) or "uncertain"
+    if verdict not in {"accept", "reject", "uncertain"}:
+        verdict = "uncertain"
+    return AgentResult(
+        agent="arbiter",
+        verdict=verdict,
+        recommended_speaker=_optional_string(decision.get("recommended_speaker")),
+        evidence_lines=_line_numbers(decision.get("evidence_lines")),
+        counter_evidence_lines=_line_numbers(decision.get("counter_evidence_lines")),
+        reason=_optional_string(decision.get("reason")) or "Arbiter did not provide a reason.",
+        confidence=_confidence(decision.get("confidence"), default="medium"),
     )
 
 
@@ -380,6 +567,7 @@ def _review_to_dict(review: Any, risk: RiskAssessment) -> dict[str, Any]:
         "reason": "Verifier returned an unsupported review object.",
         "counter_evidence_lines": [],
         "risk_signal_codes": _risk_signal_codes(risk),
+        "confidence": "low",
         "error": type(review).__name__,
     }
 
@@ -394,6 +582,14 @@ def _verifier_call_reason(verifier_mode: str, risk: RiskAssessment) -> str:
 
 
 def _verifier_trace_action(verdict: str) -> str:
+    if verdict == "accept":
+        return "accepted"
+    if verdict == "reject":
+        return "rejected"
+    return "uncertain"
+
+
+def _arbiter_trace_action(verdict: str) -> str:
     if verdict == "accept":
         return "accepted"
     if verdict == "reject":
@@ -422,6 +618,12 @@ def _optional_string(value: Any) -> Optional[str]:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _confidence(value: Any, default: str) -> str:
+    if isinstance(value, str) and value.strip().lower() in CONFIDENCE_LEVELS:
+        return value.strip().lower()
+    return default
 
 
 def _int_value(value: Any, default: int) -> int:
