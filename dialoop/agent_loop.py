@@ -6,6 +6,7 @@ from typing import Any, Optional, TextIO
 
 from .annotations import AnnotationStore, build_annotation_records
 from .coordinator import Coordinator
+from .identity import IdentityPipelineAgent
 from .local_tools import DialoopLocalTools, SpeakerCountMismatchError, ToolValidationError
 from .model_client import ChatMessage, ChatResult, ToolCall
 from .protocol import JsonAction, ProtocolError, local_tool_specs, parse_json_action
@@ -48,6 +49,7 @@ class AgentLoopConfig:
     temperature: float = 0.0
     require_context_before_submit: bool = True
     require_identity_tool_for_temporary_speaker: bool = True
+    identity_mode: str = "auto"
     verifier_mode: str = "off"
     verifier_temperature: float = 0.0
     verifier_max_tokens: int = 1200
@@ -58,6 +60,8 @@ class AgentLoopConfig:
             raise AgentLoopError(f"unsupported protocol: {self.protocol}")
         if self.verifier_mode not in {"off", "risk", "all"}:
             raise AgentLoopError(f"unsupported verifier_mode: {self.verifier_mode}")
+        if self.identity_mode not in {"off", "auto"}:
+            raise AgentLoopError(f"unsupported identity_mode: {self.identity_mode}")
         if self.max_tool_steps <= 0:
             raise AgentLoopError("max_tool_steps must be greater than 0")
         if self.context_window_lines <= 0:
@@ -223,8 +227,19 @@ class AgentRunner:
                 retries=self.config.verifier_retries,
             )
         )
+        self.identity_agent = (
+            None
+            if self.config.identity_mode == "off"
+            else IdentityPipelineAgent(
+                self.tools.dialogue_index,
+                model_client=self.model_client,
+                lookahead_lines=self.tools.identity_lookahead_lines,
+                lookahead_rounds=self.tools.identity_lookahead_rounds,
+            )
+        )
         self.coordinator = Coordinator(
             verifier_agent=self.verifier_agent,
+            identity_agent=self.identity_agent,
             verifier_mode=self.config.verifier_mode,
             verifier_context_budget=self.config.verifier_max_tokens,
         )
@@ -482,7 +497,7 @@ class AgentRunner:
             return self._commit_without_annotations(accepted_submit)
 
         records = []
-        if self.annotation_store is not None or self.verifier_agent is not None:
+        if self.annotation_store is not None or self.verifier_agent is not None or self.identity_agent is not None:
             records = build_annotation_records(
                 dialogues=dialogues,
                 speakers=speakers,
@@ -535,6 +550,7 @@ class AgentRunner:
                 record.with_review(
                     risk=decision.risk,
                     verifier=decision.verifier,
+                    identity=decision.identity,
                     arbiter=arbiter,
                     coordinator_trace=trace,
                 )
@@ -548,7 +564,7 @@ class AgentRunner:
     ) -> None:
         accepted_submit.result["accepted"] = False
         accepted_submit.result["pending_review"] = False
-        accepted_submit.result["error"] = "verifier rejected the submitted speaker before label write"
+        accepted_submit.result["error"] = coordinator_block_error(review)
         accepted_submit.result["verifier"] = review
         if isinstance(review.get("arbiter"), dict):
             accepted_submit.result["arbiter"] = review["arbiter"]
@@ -570,6 +586,7 @@ class AgentRunner:
         if (
             self.config.require_identity_tool_for_temporary_speaker
             and not self._used_identity_lookup_tool
+            and self.identity_agent is None
         ):
             temporary_speakers = temporary_identity_speakers(result["speakers"])
             if temporary_speakers:
@@ -756,6 +773,22 @@ def blocked_review_attempt(review: dict[str, Any]) -> dict[str, Any]:
         for key in ("index", "line_number", "speaker", "verdict", "reason", "risk_signal_codes")
         if key in review
     }
+    identity = review.get("identity")
+    if isinstance(identity, dict):
+        data["identity"] = {
+            key: identity[key]
+            for key in (
+                "triggered",
+                "verdict",
+                "recommended_speaker",
+                "evidence_lines",
+                "reason",
+                "confidence",
+                "same_person",
+                "candidate_ranges",
+            )
+            if key in identity
+        }
     arbiter = review.get("arbiter")
     if isinstance(arbiter, dict):
         data["arbiter"] = {
@@ -771,6 +804,13 @@ def blocked_review_attempt(review: dict[str, Any]) -> dict[str, Any]:
             if key in arbiter
         }
     return data
+
+
+def coordinator_block_error(review: dict[str, Any]) -> str:
+    arbiter = review.get("arbiter") if isinstance(review.get("arbiter"), dict) else {}
+    if arbiter.get("block_reason_code") == "identity_resolved_conflict":
+        return "identity resolver found a different speaker before label write"
+    return "verifier rejected the submitted speaker before label write"
 
 
 def repeated_fragile_review_block(
@@ -837,11 +877,13 @@ def repeated_fragile_unblock_trace_event(step: int, arbiter: Optional[dict[str, 
 def first_blocking_verifier_review(records: list[Any]) -> Optional[dict[str, Any]]:
     for record in records:
         verifier = record.verifier
+        identity = getattr(record, "identity", None)
         arbiter = getattr(record, "arbiter", None)
         if isinstance(arbiter, dict) and arbiter.get("blocks_submission") is True:
             review = dict(verifier) if isinstance(verifier, dict) else {}
             return {
                 **review,
+                "identity": identity if isinstance(identity, dict) else None,
                 "arbiter": arbiter,
                 "index": record.index,
                 "line_number": record.line_number,
@@ -852,6 +894,7 @@ def first_blocking_verifier_review(records: list[Any]) -> Optional[dict[str, Any
         if verifier.get("enabled") is True and verifier.get("verdict") == "fail":
             return {
                 **verifier,
+                "identity": identity if isinstance(identity, dict) else None,
                 "arbiter": arbiter if isinstance(arbiter, dict) else None,
                 "index": record.index,
                 "line_number": record.line_number,
@@ -877,14 +920,35 @@ def verifier_retry_message(review: dict[str, Any]) -> str:
             "If the same speaker is still best, resubmit with evidence_lines, reason, "
             "rejected_candidates comparing at least one plausible alternative speaker, and confidence."
         )
+    identity_instruction = ""
+    identity = review.get("identity") if isinstance(review.get("identity"), dict) else {}
+    if arbiter.get("block_reason_code") == "identity_resolved_conflict":
+        recommended = arbiter.get("recommended_speaker") or identity.get("recommended_speaker")
+        evidence_lines = identity.get("evidence_lines")
+        identity_instruction = (
+            " Identity Resolver found a stable evidence-backed speaker"
+            f"{f' ({recommended})' if isinstance(recommended, str) and recommended else ''}."
+            f" Evidence lines: {evidence_lines if isinstance(evidence_lines, list) else 'none'}. "
+            "Resubmit with the resolved speaker unless you can cite stronger counter-evidence."
+        )
+    rejection_source = (
+        "Coordinator rejected the submitted label before writing it to the output file."
+        if arbiter.get("block_reason_code") == "identity_resolved_conflict"
+        else "Verifier rejected the submitted label before writing it to the output file."
+    )
+    reason_label = (
+        "Coordinator reason" if arbiter.get("block_reason_code") == "identity_resolved_conflict" else "Verifier reason"
+    )
+    reason_text = arbiter_reason if arbiter.get("block_reason_code") == "identity_resolved_conflict" else reason
     return (
-        "Verifier rejected the submitted label before writing it to the output file. "
+        f"{rejection_source} "
         f"Dialogue index={review.get('index')} line={review.get('line_number')} "
         f"speaker={review.get('speaker')} was not accepted. "
-        f"Verifier reason: {reason}.{arbiter_text} "
+        f"{reason_label}: {reason_text or reason}.{arbiter_text} "
         f"Risk signals: {', '.join(str(code) for code in risk_codes) or 'none'}. "
         "Read or search more context if needed, then call submit_labels again with a corrected speaker."
         f"{fragile_instruction}"
+        f"{identity_instruction}"
     )
 
 

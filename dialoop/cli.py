@@ -148,6 +148,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Soft maximum identity lookahead rounds for one temporary speaker.",
     )
     parser.add_argument(
+        "--identity-mode",
+        choices=["off", "auto"],
+        default="auto",
+        help="Identity Locator/Resolver Coordinator mode: auto runs bounded identity review for temporary speakers.",
+    )
+    parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
         help="OpenAI-compatible model endpoint base URL.",
@@ -265,6 +271,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 following_context_dialogues=args.following_context_dialogues,
                 identity_lookahead_lines=args.identity_lookahead_lines,
                 identity_lookahead_rounds=args.identity_lookahead_rounds,
+                identity_mode=args.identity_mode,
                 verifier_mode=args.verifier_mode,
                 verifier_max_tokens=args.verifier_max_tokens,
                 verifier_retries=args.verifier_retries,
@@ -306,6 +313,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             protocol=args.protocol,
             max_tool_steps=args.max_tool_steps,
             context_window_lines=args.context_window_lines,
+            identity_mode=args.identity_mode,
             verifier_mode=args.verifier_mode,
             verifier_max_tokens=args.verifier_max_tokens,
             verifier_retries=args.verifier_retries,
@@ -400,6 +408,7 @@ def render_dry_run_report(
     following_context_dialogues: Optional[int] = None,
     identity_lookahead_lines: Optional[int] = None,
     identity_lookahead_rounds: Optional[int] = None,
+    identity_mode: Optional[str] = None,
     verifier_mode: Optional[str] = None,
     verifier_max_tokens: Optional[int] = None,
     verifier_retries: Optional[int] = None,
@@ -438,6 +447,8 @@ def render_dry_run_report(
         lines.append(f"  identity_lookahead_lines: {identity_lookahead_lines}")
     if identity_lookahead_rounds is not None:
         lines.append(f"  identity_lookahead_rounds: {identity_lookahead_rounds}")
+    if identity_mode is not None:
+        lines.append(f"  identity_mode: {identity_mode}")
     if verifier_mode is not None:
         lines.append(f"  verifier_mode: {verifier_mode}")
     if verifier_max_tokens is not None:
