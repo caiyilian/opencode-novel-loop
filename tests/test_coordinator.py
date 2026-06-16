@@ -18,6 +18,19 @@ class FakeVerifierAgent:
         return self.review
 
 
+class FakeIdentityAgent:
+    def __init__(self, review: dict):
+        self.payload = review
+        self.calls: list[AnnotationRecord] = []
+
+    def review_identity(self, record: AnnotationRecord) -> dict:
+        self.calls.append(record)
+        return self.payload
+
+    def review(self, record: AnnotationRecord) -> dict:
+        return self.review_identity(record)
+
+
 def sample_record(**overrides) -> AnnotationRecord:
     data = {
         "index": 0,
@@ -249,6 +262,52 @@ class CoordinatorTest(unittest.TestCase):
         self.assertEqual(resolver_events[0]["action"], "observed")
         self.assertEqual(resolver_events[0]["result"]["verdict"], "resolved")
         self.assertEqual(resolver_events[0]["result"]["recommended_speaker"], "Stable Name")
+
+    def test_coordinator_calls_identity_agent_for_temporary_speaker_and_blocks_conflict(self) -> None:
+        identity = FakeIdentityAgent(
+            {
+                "enabled": True,
+                "triggered": True,
+                "speaker": "\u5c11\u5973",
+                "verdict": "resolved",
+                "recommended_speaker": "\u963f\u6d1b",
+                "evidence_lines": [3],
+                "reason": "bounded identity evidence",
+                "confidence": "high",
+                "candidate_ranges": [{"start_line": 2, "end_line": 4, "matched_line": 3}],
+                "locator_attempts": [],
+                "resolver": {"verdict": "resolved", "recommended_speaker": "\u963f\u6d1b"},
+            }
+        )
+
+        decision = Coordinator(identity_agent=identity, verifier_mode="off").review(
+            sample_record(speaker="\u5c11\u5973"),
+            risk("low"),
+        )
+        trace = decision.trace_dicts()
+
+        self.assertEqual(len(identity.calls), 1)
+        self.assertEqual(decision.identity["recommended_speaker"], "\u963f\u6d1b")
+        self.assertTrue(decision.blocks_submission)
+        self.assertEqual(decision.arbiter["decision"], "use_resolved_identity")
+        self.assertEqual(decision.arbiter["recommended_speaker"], "\u963f\u6d1b")
+        self.assertEqual(decision.arbiter["block_reason_code"], "identity_resolved_conflict")
+        self.assertIn(("identity_locator", "called"), [(event["agent"], event["action"]) for event in trace])
+        self.assertIn(("identity_resolver", "resolved"), [(event["agent"], event["action"]) for event in trace])
+
+    def test_coordinator_does_not_trigger_identity_for_known_false_positive_terms(self) -> None:
+        for speaker in ("\u7537\u5b50", "\u54b1", "\u7537\u5b69", "\u620f\u66f2\u6545\u4e8b\u91cc\u7684\u7537\u5b69"):
+            with self.subTest(speaker=speaker):
+                identity = FakeIdentityAgent({"verdict": "resolved", "recommended_speaker": "\u9519\u8bef"})
+
+                decision = Coordinator(identity_agent=identity, verifier_mode="off").review(
+                    sample_record(speaker=speaker),
+                    risk("low"),
+                )
+
+                self.assertEqual(identity.calls, [])
+                self.assertIsNone(decision.identity)
+                self.assertFalse(decision.blocks_submission)
 
 
 if __name__ == "__main__":

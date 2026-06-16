@@ -574,6 +574,113 @@ class AgentLoopTest(unittest.TestCase):
         self.assertIn("normalizer", [event["agent"] for event in row["coordinator_trace"]])
         self.assertIn("arbiter", [event["agent"] for event in row["coordinator_trace"]])
 
+    def test_coordinator_identity_agent_resolves_temporary_speaker_without_labeler_tool_call(self) -> None:
+        text = "\n".join(
+            [
+                "\u5c11\u5973\u8bf4\uff1a\u300cHelp.\u300d",
+                "\u5979\u540e\u6765\u4f4e\u58f0\u8bf4\uff1a\u300c\u6211\u53eb\u963f\u6d1b\u3002\u300d",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            annotations = Path(directory) / "annotations.jsonl"
+            tools = DialoopLocalTools(
+                DialogueIndex.from_text(text),
+                LabelStore(labels),
+                batch_size=1,
+                identity_lookahead_lines=5,
+            )
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="submit-temp",
+                                name="submit_labels",
+                                arguments={
+                                    "speakers": ["\u5c11\u5973"],
+                                    "evidence_lines": [1],
+                                    "reason": "Only a temporary identity appears at the dialogue line.",
+                                    "confidence": "medium",
+                                },
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content=(
+                            '{"candidates":[{"start_line":2,"end_line":2,"matched_line":2,'
+                            '"suggested_names":["\u963f\u6d1b"],"reason":"line 2 gives a stable name"}],'
+                            '"reason":"bounded later context has a name marker"}'
+                        )
+                    ),
+                    ChatResult(
+                        content=(
+                            '{"verdict":"resolved","same_person":true,"recommended_speaker":"\u963f\u6d1b",'
+                            '"evidence_lines":[2],"reason":"line 2 names the same temporary speaker",'
+                            '"confidence":"high"}'
+                        )
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="submit-resolved",
+                                name="submit_labels",
+                                arguments={
+                                    "speakers": ["\u963f\u6d1b"],
+                                    "evidence_lines": [2],
+                                    "reason": "Identity Resolver found the stable name in bounded later context.",
+                                    "rejected_candidates": ["\u5c11\u5973"],
+                                    "confidence": "high",
+                                },
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=4, verifier_mode="off"),
+                annotation_store=AnnotationStore(annotations),
+            ).run_one_batch()
+            stored_labels = LabelStore(labels).labels()
+            row = json.loads(annotations.read_text(encoding="utf-8").splitlines()[0])
+
+        self.assertTrue(result.submitted)
+        self.assertEqual(result.tool_steps, 3)
+        self.assertEqual(stored_labels, ["\u963f\u6d1b"])
+        self.assertEqual(result.tool_history[1].result["accepted"], False)
+        self.assertIn("identity resolver", result.tool_history[1].result["error"])
+        self.assertEqual(row["speaker"], "\u963f\u6d1b")
+        self.assertEqual(row["recovery"]["blocked_reviews"][0]["identity"]["recommended_speaker"], "\u963f\u6d1b")
+        self.assertEqual(row["recovery"]["blocked_reviews"][0]["identity"]["evidence_lines"], [2])
+        self.assertTrue(row["recovery"]["blocked_reviews"][0]["identity"]["same_person"])
+        self.assertEqual(
+            row["recovery"]["blocked_reviews"][0]["identity"]["candidate_ranges"][0]["matched_line"],
+            2,
+        )
+        self.assertEqual(
+            row["recovery"]["blocked_reviews"][0]["arbiter"]["block_reason_code"],
+            "identity_resolved_conflict",
+        )
+        self.assertIsNone(row["identity"])
+        self.assertEqual(len(client.calls), 5)
+        self.assertIn("Identity Locator Agent", client.calls[2]["messages"][0].content)
+        self.assertIn("Identity Resolver Agent", client.calls[3]["messages"][0].content)
+
     def test_json_action_loop_submits_labels_without_native_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             labels = Path(directory) / "labels.txt"
@@ -732,7 +839,11 @@ class AgentLoopTest(unittest.TestCase):
                 ]
             )
 
-            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=4)).run_one_batch()
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=4, identity_mode="off"),
+            ).run_one_batch()
 
             self.assertTrue(result.submitted)
             self.assertEqual(LabelStore(labels).labels(), ["Lawrence"])
@@ -743,8 +854,8 @@ class AgentLoopTest(unittest.TestCase):
     def test_temporary_identity_submit_requires_identity_tool_before_write(self) -> None:
         text = "\n".join(
             [
-                "少女说：「救命。」",
-                "她后来跑进森林。",
+                "\u5c11\u5973\u8bf4\uff1a\u300c\u6551\u547d\u3002\u300d",
+                "\u5979\u540e\u6765\u8dd1\u8fdb\u68ee\u6797\u3002",
             ]
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -769,7 +880,7 @@ class AgentLoopTest(unittest.TestCase):
                                 id="early-temp-submit",
                                 name="submit_labels",
                                 arguments={
-                                    "speakers": ["少女"],
+                                    "speakers": ["\u5c11\u5973"],
                                     "evidence_lines": [1],
                                     "reason": "Only a temporary identity is known.",
                                     "confidence": "medium",
@@ -783,7 +894,7 @@ class AgentLoopTest(unittest.TestCase):
                             ToolCall(
                                 id="locate",
                                 name="locate_identity",
-                                arguments={"speaker": "少女"},
+                                arguments={"speaker": "\u5c11\u5973"},
                             )
                         ],
                     ),
@@ -794,7 +905,7 @@ class AgentLoopTest(unittest.TestCase):
                                 id="submit-after-lookup",
                                 name="submit_labels",
                                 arguments={
-                                    "speakers": ["少女"],
+                                    "speakers": ["\u5c11\u5973"],
                                     "evidence_lines": [1],
                                     "reason": "Bounded identity lookup found no stable name, so keep the temporary identity.",
                                     "confidence": "medium",
@@ -805,10 +916,14 @@ class AgentLoopTest(unittest.TestCase):
                 ]
             )
 
-            result = AgentRunner(client, tools, AgentLoopConfig(protocol="tools", max_tool_steps=4)).run_one_batch()
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=4, identity_mode="off"),
+            ).run_one_batch()
 
             self.assertTrue(result.submitted)
-            self.assertEqual(LabelStore(labels).labels(), ["少女"])
+            self.assertEqual(LabelStore(labels).labels(), ["\u5c11\u5973"])
             self.assertEqual(result.tool_history[1].result["accepted"], False)
             self.assertIn("temporary identity speaker", result.tool_history[1].result["error"])
             self.assertIn("locate_identity", result.tool_history[1].result["instruction"])
