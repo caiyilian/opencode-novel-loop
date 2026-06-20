@@ -138,6 +138,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("following_context_dialogues: 8", output)
         self.assertIn("identity_lookahead_lines: 120", output)
         self.assertIn("identity_lookahead_rounds: 2", output)
+        self.assertIn("identity_mode: auto", output)
         self.assertIn("verifier_mode: risk", output)
         self.assertIn("verifier_max_tokens: 1200", output)
         self.assertIn("verifier_retries: 1", output)

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from .identity import should_coordinate_identity_lookup
 from .local_tools import DialogueIndex
 
 
@@ -138,6 +139,8 @@ class CoordinatorTraceAudit:
     needs_verifier_counts: Counter[str] = field(default_factory=Counter)
     verifier_action_counts: Counter[str] = field(default_factory=Counter)
     verifier_action_by_risk: Counter[str] = field(default_factory=Counter)
+    identity_locator_action_counts: Counter[str] = field(default_factory=Counter)
+    identity_resolver_action_counts: Counter[str] = field(default_factory=Counter)
     tool_call_counts: Counter[str] = field(default_factory=Counter)
     tool_observed_counts: Counter[str] = field(default_factory=Counter)
     problems: list[AnnotationProblem] = field(default_factory=list)
@@ -156,6 +159,11 @@ class AnnotationAttribution:
     verifier_reason: Optional[str]
     confidence: str
     risk_signal_codes: list[str]
+    identity_triggered: str = "none"
+    identity_verdict: str = "none"
+    identity_recommended_speaker: Optional[str] = None
+    identity_evidence_lines: list[int] = field(default_factory=list)
+    blocked_identity_review_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -544,6 +552,8 @@ def audit_coordinator_trace(
     needs_verifier_counts: Counter[str] = Counter()
     verifier_action_counts: Counter[str] = Counter()
     verifier_action_by_risk: Counter[str] = Counter()
+    identity_locator_action_counts: Counter[str] = Counter()
+    identity_resolver_action_counts: Counter[str] = Counter()
     tool_call_counts: Counter[str] = Counter()
     tool_observed_counts: Counter[str] = Counter()
 
@@ -639,6 +649,10 @@ def audit_coordinator_trace(
                     verifier_actions.append(action)
                     verifier_action_counts[action] += 1
                     verifier_action_by_risk[f"{risk_level}:{action}"] += 1
+                elif agent == "identity_locator":
+                    identity_locator_action_counts[action] += 1
+                elif agent == "identity_resolver":
+                    identity_resolver_action_counts[action] += 1
             problems.extend(
                 _coordinator_verifier_problems(
                     verifier_mode=verifier_mode,
@@ -678,6 +692,8 @@ def audit_coordinator_trace(
         needs_verifier_counts=needs_verifier_counts,
         verifier_action_counts=verifier_action_counts,
         verifier_action_by_risk=verifier_action_by_risk,
+        identity_locator_action_counts=identity_locator_action_counts,
+        identity_resolver_action_counts=identity_resolver_action_counts,
         tool_call_counts=tool_call_counts,
         tool_observed_counts=tool_observed_counts,
         problems=problems,
@@ -700,6 +716,14 @@ def render_coordinator_trace_audit(audit: CoordinatorTraceAudit, show_problems: 
         (
             "  verifier.trace_actions: "
             f"{_render_counter(audit.verifier_action_counts, ['called', 'accepted', 'rejected', 'uncertain', 'skipped'])}"
+        ),
+        (
+            "  identity_locator.trace_actions: "
+            f"{_render_counter(audit.identity_locator_action_counts, ['called', 'located', 'not_enough_evidence', 'observed'])}"
+        ),
+        (
+            "  identity_resolver.trace_actions: "
+            f"{_render_counter(audit.identity_resolver_action_counts, ['called', 'resolved', 'not_same_person', 'not_enough_evidence', 'observed'])}"
         ),
         f"  verifier.by_risk: {_render_counter(audit.verifier_action_by_risk, _verifier_by_risk_order())}",
         f"  tool_calls: {_render_counter(audit.tool_call_counts, list(COORDINATOR_TRACE_TOOL_AGENTS))}",
@@ -914,7 +938,7 @@ def attribute_mismatches(
             risk_signal_counts.update(risk_signal_codes)
         else:
             risk_signal_counts["none"] += 1
-        category_counts.update(_mismatch_categories(annotation))
+        category_counts.update(_mismatch_categories(annotation, mismatch))
 
     return MismatchAttributionReport(
         evaluation=evaluation,
@@ -958,6 +982,9 @@ def load_annotation_attributions(annotations_path: Path) -> dict[int, Annotation
 
             risk = row.get("risk") if isinstance(row.get("risk"), dict) else {}
             verifier = row.get("verifier") if isinstance(row.get("verifier"), dict) else {}
+            identity = row.get("identity") if isinstance(row.get("identity"), dict) else {}
+            recovery = row.get("recovery") if isinstance(row.get("recovery"), dict) else {}
+            blocked_identity_reviews = _blocked_identity_reviews(recovery)
             annotations[index] = AnnotationAttribution(
                 jsonl_line=jsonl_line,
                 risk_level=_counter_key(risk.get("level")),
@@ -966,6 +993,11 @@ def load_annotation_attributions(annotations_path: Path) -> dict[int, Annotation
                 verifier_reason=_optional_str(verifier.get("reason")),
                 confidence=_counter_key(row.get("confidence")),
                 risk_signal_codes=_risk_signal_codes(risk),
+                identity_triggered=_counter_key(identity.get("triggered")),
+                identity_verdict=_counter_key(identity.get("verdict")),
+                identity_recommended_speaker=_optional_str(identity.get("recommended_speaker")),
+                identity_evidence_lines=_line_numbers(identity.get("evidence_lines")),
+                blocked_identity_review_count=len(blocked_identity_reviews),
             )
     return annotations
 
@@ -1037,7 +1069,7 @@ def render_mismatch_attribution_report(
             f"  diagnostic_hints: {_render_counter(report.diagnostic_hint_counts, ['none'])}",
             (
                 "  categories: "
-                f"{_render_counter(report.category_counts, ['medium_or_lower_risk_no_verifier', 'high_risk_verifier_pass', 'verifier_uncertain', 'high_confidence', 'missing_annotation'])}"
+                f"{_render_counter(report.category_counts, ['identity_related', 'medium_or_lower_risk_no_verifier', 'high_risk_verifier_pass', 'verifier_uncertain', 'high_confidence', 'missing_annotation'])}"
             ),
         ]
     )
@@ -1232,10 +1264,36 @@ def _risk_signal_codes(risk: dict[str, Any]) -> list[str]:
     return codes
 
 
-def _mismatch_categories(annotation: Optional[AnnotationAttribution]) -> list[str]:
+def _blocked_identity_reviews(recovery: dict[str, Any]) -> list[dict[str, Any]]:
+    blocked_reviews = recovery.get("blocked_reviews")
+    if not isinstance(blocked_reviews, list):
+        return []
+    return [
+        review["identity"]
+        for review in blocked_reviews
+        if isinstance(review, dict) and isinstance(review.get("identity"), dict)
+    ]
+
+
+def _line_numbers(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    seen: set[int] = set()
+    lines: list[int] = []
+    for item in value:
+        if type(item) is not int or item <= 0 or item in seen:
+            continue
+        seen.add(item)
+        lines.append(item)
+    return lines
+
+
+def _mismatch_categories(annotation: Optional[AnnotationAttribution], mismatch: LabelMismatch) -> list[str]:
     if annotation is None:
         return ["missing_annotation"]
     categories: list[str] = []
+    if _identity_related_mismatch(annotation, mismatch):
+        categories.append("identity_related")
     if annotation.risk_level in {"low", "medium"} and annotation.verifier_verdict == "none":
         categories.append("medium_or_lower_risk_no_verifier")
     if annotation.risk_level == "high" and annotation.verifier_verdict == "pass":
@@ -1245,6 +1303,16 @@ def _mismatch_categories(annotation: Optional[AnnotationAttribution]) -> list[st
     if annotation.confidence == "high":
         categories.append("high_confidence")
     return categories or ["other"]
+
+
+def _identity_related_mismatch(annotation: AnnotationAttribution, mismatch: LabelMismatch) -> bool:
+    if should_coordinate_identity_lookup(mismatch.actual):
+        return True
+    if annotation.identity_triggered == "true":
+        return True
+    if annotation.identity_verdict in {"resolved", "not_same_person", "not_enough_evidence"}:
+        return True
+    return annotation.blocked_identity_review_count > 0
 
 
 def _diagnostic_semantic_length(text: str) -> int:

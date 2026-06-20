@@ -339,6 +339,8 @@ class QualityTest(unittest.TestCase):
             row = annotation_row(index=0, risk_level="low", needs_verifier=False, verifier_verdict=None)
             row["coordinator_trace"] = [
                 trace_event("labeler", "accepted"),
+                trace_event("identity_locator", "called"),
+                trace_event("identity_locator", "not_enough_evidence"),
                 trace_event("verifier", "skipped"),
             ]
             annotations_path.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
@@ -350,6 +352,8 @@ class QualityTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Dialoop coordinator trace audit", stdout.getvalue())
         self.assertIn("records_with_trace: 1", stdout.getvalue())
+        self.assertIn("identity_locator.trace_actions: called=1, not_enough_evidence=1", stdout.getvalue())
+        self.assertIn("identity_resolver.trace_actions: none", stdout.getvalue())
         self.assertIn("problems: 0", stdout.getvalue())
 
     def test_attribute_mismatches_groups_annotation_metadata(self) -> None:
@@ -418,6 +422,38 @@ class QualityTest(unittest.TestCase):
         self.assertIn("same_line_multiple_dialogues", rendered)
         self.assertIn("index=0 line=1 expected=A actual=B risk=high verifier=pass", rendered)
         self.assertIn("... 1 more mismatch(es) omitted", rendered)
+
+    def test_mismatch_attribution_counts_identity_related_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            answers_path = root / "answers.txt"
+            labels_path = root / "labels.txt"
+            annotations_path = root / "annotations.jsonl"
+            answers_path.write_text("\u3010\u963f\u6d1b\u3011\u300cHelp.\u300d\n", encoding="utf-8")
+            labels_path.write_text("\u5c11\u5973\n", encoding="utf-8")
+            row = {
+                "index": 0,
+                "confidence": "medium",
+                "risk": {"level": "medium", "needs_verifier": False, "signals": []},
+                "verifier": None,
+                "identity": {
+                    "triggered": True,
+                    "verdict": "not_enough_evidence",
+                    "recommended_speaker": None,
+                    "evidence_lines": [],
+                },
+            }
+            annotations_path.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
+
+            report = attribute_mismatches(
+                answer_path=answers_path,
+                labels_path=labels_path,
+                annotations_path=annotations_path,
+            )
+            rendered = render_mismatch_attribution_report(report, max_errors=1)
+
+        self.assertEqual(report.category_counts["identity_related"], 1)
+        self.assertIn("categories: identity_related=1", rendered)
 
     def test_quality_cli_mismatch_attribution_reports_grouped_mismatches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
