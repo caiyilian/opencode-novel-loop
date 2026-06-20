@@ -44,6 +44,23 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(speakers["minItems"], 2)
         self.assertEqual(speakers["maxItems"], 2)
 
+    def test_local_tool_specs_can_omit_identity_tools_for_coordinator_mode(self) -> None:
+        specs = local_tool_specs(submit_label_count=1, include_identity_tools=False)
+        names = {spec.name for spec in specs}
+
+        self.assertEqual(
+            names,
+            {
+                "get_next_dialogue",
+                "read_novel",
+                "search_novel",
+                "submit_labels",
+            },
+        )
+        submit = next(spec for spec in specs if spec.name == "submit_labels")
+        self.assertNotIn("locate_identity", submit.description)
+        self.assertNotIn("normalize_speaker", submit.description)
+
     def test_parse_json_action_from_plain_json(self) -> None:
         action = parse_json_action('{"action":"read_novel","args":{"start_line":1,"end_line":3}}')
 

@@ -32,7 +32,10 @@ class JsonAction:
     args: dict[str, Any]
 
 
-def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
+def local_tool_specs(
+    submit_label_count: int | None = None,
+    include_identity_tools: bool = True,
+) -> list[ToolSpec]:
     speaker_items_schema: dict[str, Any] = {
         "type": "array",
         "items": {"type": "string", "minLength": 1},
@@ -41,7 +44,7 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
     if submit_label_count is not None:
         speaker_items_schema["maxItems"] = submit_label_count
 
-    return [
+    specs = [
         ToolSpec(
             name="get_next_dialogue",
             description="Get the next unlabeled dialogue batch and current labeling progress.",
@@ -83,137 +86,151 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
                 "additionalProperties": False,
             },
         ),
-        ToolSpec(
-            name="locate_identity",
-            description=(
-                "Required before submit_labels when a trackable concrete person is only labeled by a temporary "
-                "identity such as a girl, young person, or old person. It scans later novel lines for bounded "
-                "identity-introduction ranges and returns candidates only; it never changes labels. Do not use "
-                "for first-person pronouns or verbal quirks such as 我/咱, and do not use for characters inside a "
-                "story, play, rumor, or quoted example narrated by the real speaker."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "speaker": {"type": "string", "minLength": 1},
-                    "dialogue_index": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "Optional dialogue index to anchor the search; defaults to the active batch.",
+    ]
+
+    if include_identity_tools:
+        specs.extend(
+            [
+                ToolSpec(
+                    name="locate_identity",
+                    description=(
+                        "Required before submit_labels when a trackable concrete person is only labeled by a temporary "
+                        "identity such as a girl, young person, or old person. It scans later novel lines for bounded "
+                        "identity-introduction ranges and returns candidates only; it never changes labels. Do not use "
+                        "for first-person pronouns or verbal quirks such as 我/咱, and do not use for characters inside a "
+                        "story, play, rumor, or quoted example narrated by the real speaker."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "speaker": {"type": "string", "minLength": 1},
+                            "dialogue_index": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Optional dialogue index to anchor the search; defaults to the active batch.",
+                            },
+                            "search_after_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Optional 1-based line to start searching after.",
+                            },
+                            "lookahead_lines": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Optional bounded lookahead line count.",
+                            },
+                            "max_candidates": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["speaker"],
+                        "additionalProperties": False,
                     },
-                    "search_after_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional 1-based line to start searching after.",
+                ),
+                ToolSpec(
+                    name="resolve_identity",
+                    description=(
+                        "Use immediately after locate_identity returns candidate ranges. Read a bounded candidate range and "
+                        "decide whether it contains a stable name for the same temporary speaker. Returns resolved, "
+                        "not_same_person, or not_enough_evidence style metadata; it never changes labels. A place, "
+                        "organization, or story-internal character is not a resolved speaker identity."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "speaker": {"type": "string", "minLength": 1},
+                            "start_line": {"type": "integer", "minimum": 1},
+                            "end_line": {"type": "integer", "minimum": 1},
+                            "dialogue_index": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Optional dialogue index for current-dialogue context.",
+                            },
+                        },
+                        "required": ["speaker", "start_line", "end_line"],
+                        "additionalProperties": False,
                     },
-                    "lookahead_lines": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional bounded lookahead line count.",
+                ),
+                ToolSpec(
+                    name="record_character",
+                    description=(
+                        "Add or update a lightweight character library entry after a stable speaker name or alias is "
+                        "supported by evidence. Use this before submit_labels when identity lookup resolves a new display "
+                        "name. This auxiliary memory tool does not overwrite submitted labels."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "display_name": {"type": "string", "minLength": 1},
+                            "aliases": {"type": "array", "items": {"type": "string"}},
+                            "summary": {"type": "string"},
+                            "evidence_lines": {
+                                "type": "array",
+                                "items": {"type": "integer", "minimum": 1},
+                            },
+                            "last_seen_dialogue_index": {"type": "integer", "minimum": 0},
+                            "last_seen_line_number": {"type": "integer", "minimum": 1},
+                            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                        },
+                        "required": ["display_name"],
+                        "additionalProperties": False,
                     },
-                    "max_candidates": {"type": "integer", "minimum": 1},
-                },
-                "required": ["speaker"],
-                "additionalProperties": False,
-            },
-        ),
-        ToolSpec(
-            name="resolve_identity",
-            description=(
-                "Use immediately after locate_identity returns candidate ranges. Read a bounded candidate range and "
-                "decide whether it contains a stable name for the same temporary speaker. Returns resolved, "
-                "not_same_person, or not_enough_evidence style metadata; it never changes labels. A place, "
-                "organization, or story-internal character is not a resolved speaker identity."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "speaker": {"type": "string", "minLength": 1},
-                    "start_line": {"type": "integer", "minimum": 1},
-                    "end_line": {"type": "integer", "minimum": 1},
-                    "dialogue_index": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "Optional dialogue index for current-dialogue context.",
+                ),
+                ToolSpec(
+                    name="normalize_speaker",
+                    description=(
+                        "Required before submit_labels when the character library is non-empty and the candidate speaker may "
+                        "be an alias, short form, or temporary description. Returns a suggestion only; the model must still "
+                        "submit the final speaker explicitly."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "speaker": {"type": "string", "minLength": 1},
+                        },
+                        "required": ["speaker"],
+                        "additionalProperties": False,
                     },
-                },
-                "required": ["speaker", "start_line", "end_line"],
-                "additionalProperties": False,
-            },
-        ),
-        ToolSpec(
-            name="record_character",
-            description=(
-                "Add or update a lightweight character library entry after a stable speaker name or alias is "
-                "supported by evidence. Use this before submit_labels when identity lookup resolves a new display "
-                "name. This auxiliary memory tool does not overwrite submitted labels."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "display_name": {"type": "string", "minLength": 1},
-                    "aliases": {"type": "array", "items": {"type": "string"}},
-                    "summary": {"type": "string"},
-                    "evidence_lines": {
-                        "type": "array",
-                        "items": {"type": "integer", "minimum": 1},
+                ),
+                ToolSpec(
+                    name="arbitrate_identity",
+                    description=(
+                        "Required when Labeler, Verifier, Identity Resolver, and Name Normalizer conclusions conflict. "
+                        "Compares the evidence-backed conclusions and returns a recommendation only; it never writes labels."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "labeler_speaker": {"type": "string", "minLength": 1},
+                            "verifier_verdict": {"type": "string", "enum": ["pass", "fail", "uncertain", "error"]},
+                            "resolver_verdict": {
+                                "type": "string",
+                                "enum": ["resolved", "not_same_person", "not_enough_evidence"],
+                            },
+                            "resolver_speaker": {"type": "string"},
+                            "normalizer_speaker": {"type": "string"},
+                        },
+                        "required": ["labeler_speaker"],
+                        "additionalProperties": False,
                     },
-                    "last_seen_dialogue_index": {"type": "integer", "minimum": 0},
-                    "last_seen_line_number": {"type": "integer", "minimum": 1},
-                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-                },
-                "required": ["display_name"],
-                "additionalProperties": False,
-            },
-        ),
-        ToolSpec(
-            name="normalize_speaker",
-            description=(
-                "Required before submit_labels when the character library is non-empty and the candidate speaker may "
-                "be an alias, short form, or temporary description. Returns a suggestion only; the model must still "
-                "submit the final speaker explicitly."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "speaker": {"type": "string", "minLength": 1},
-                },
-                "required": ["speaker"],
-                "additionalProperties": False,
-            },
-        ),
-        ToolSpec(
-            name="arbitrate_identity",
-            description=(
-                "Required when Labeler, Verifier, Identity Resolver, and Name Normalizer conclusions conflict. "
-                "Compares the evidence-backed conclusions and returns a recommendation only; it never writes labels."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "labeler_speaker": {"type": "string", "minLength": 1},
-                    "verifier_verdict": {"type": "string", "enum": ["pass", "fail", "uncertain", "error"]},
-                    "resolver_verdict": {
-                        "type": "string",
-                        "enum": ["resolved", "not_same_person", "not_enough_evidence"],
-                    },
-                    "resolver_speaker": {"type": "string"},
-                    "normalizer_speaker": {"type": "string"},
-                },
-                "required": ["labeler_speaker"],
-                "additionalProperties": False,
-            },
-        ),
+                ),
+            ]
+        )
+
+    submit_description = (
+        "Submit one speaker name for each dialogue in the active batch, in order. "
+        'Arguments must use the exact shape {"speakers":["speaker1", "..."]}. '
+        "When possible, include evidence_lines, reason, rejected_candidates, and confidence. "
+    )
+    if include_identity_tools:
+        submit_description += (
+            "Do not submit a trackable temporary identity speaker before using locate_identity/resolve_identity. "
+            "Do not submit an alias-like speaker before checking normalize_speaker when known characters exist. "
+        )
+    submit_description += "Do not include labels for previous_dialogues, following_dialogues, or raw context lines."
+
+    specs.append(
         ToolSpec(
             name="submit_labels",
-            description=(
-                "Submit one speaker name for each dialogue in the active batch, in order. "
-                'Arguments must use the exact shape {"speakers":["speaker1", "..."]}. '
-                "When possible, include evidence_lines, reason, rejected_candidates, and confidence. "
-                "Do not submit a trackable temporary identity speaker before using locate_identity/resolve_identity. "
-                "Do not submit an alias-like speaker before checking normalize_speaker when known characters exist. "
-                "Do not include labels for previous_dialogues, following_dialogues, or raw context lines."
-            ),
+            description=submit_description,
             parameters={
                 "type": "object",
                 "properties": {
@@ -268,7 +285,8 @@ def local_tool_specs(submit_label_count: int | None = None) -> list[ToolSpec]:
                 "additionalProperties": False,
             },
         ),
-    ]
+    )
+    return specs
 
 
 def openai_tools_schema() -> list[dict[str, Any]]:

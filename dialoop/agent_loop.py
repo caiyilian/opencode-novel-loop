@@ -95,13 +95,28 @@ class AgentBatchResult:
     annotations_written: int = 0
 
 
-def system_prompt(protocol: str) -> str:
+def system_prompt(protocol: str, include_identity_tools: bool = True) -> str:
     json_instruction = ""
     if protocol in {"auto", "json"}:
         json_instruction = (
             "\n如果原生 tool calling 不可用，请严格只输出一个 JSON object，例如："
             '{"action":"read_novel","args":{"start_line":1,"end_line":20}}. '
             "准备好后用 submit_labels 提交。"
+        )
+    if include_identity_tools:
+        identity_instruction = (
+            "身份工具触发规则是强规则：遇到少女、女孩、姑娘、少年、老人、老者这类可追踪具体人物的临时身份词时，不要直接 submit_labels，必须先调用 locate_identity 查找后文候选区域；如果返回候选，再调用 resolve_identity 细读候选区域。"
+            "如果 resolve_identity 得到稳定姓名或称呼，使用该结果作为候选 speaker，并用 record_character 记录显示名、别名和证据；如果有界查找没有证据，可以保留临时身份词，但必须在 reason 里说明查找结果。"
+            "如果已有角色库条目，提交前凡是 speaker 可能是别名、简称或临时称呼，必须调用 normalize_speaker 获取显示名归一建议；该建议只辅助判断，不能自动覆盖原文证据或 submit_labels 的最终 speaker。"
+            "当 Labeler、Verifier、Identity Resolver 或 Normalizer 结论冲突时，必须调用 arbitrate_identity 获取裁决建议；最终仍必须用 submit_labels 明确提交。"
+            "不要把“我”“咱”“汝”“你”“您”等代词或口癖当成身份后置词；如果上下文已经能判断这是某个已知角色的自称，直接用该角色名，不要对代词调用 locate_identity。"
+        )
+    else:
+        identity_instruction = (
+            "如果候选 speaker 是少女、女孩、姑娘、少年、老人、老者等临时身份词，请先按当前上下文提交最佳 speaker；"
+            "提交后 Coordinator 会用独立 Identity Locator / Resolver 子 agent 做有界身份复核。"
+            "不要在主 Labeler 阶段为临时身份无限查找姓名。"
+            "不要把“我”“咱”“汝”“你”“您”等代词或口癖当成身份后置词；如果上下文已经能判断这是某个已知角色的自称，直接用该角色名。"
         )
 
     return (
@@ -113,12 +128,8 @@ def system_prompt(protocol: str) -> str:
         "如果没有姓名但上下文有身份或群体，请用中文身份词，例如：村民、骑士、店员、商人、众人、未知。"
         "不要用临时行为关系替代更稳定身份；例如上下文说明是村落居民时，用“村民”而不是“顾客”。"
         "如果当前上下文只给出“女孩”“少年”“老人”等临时描述，但这是一个可追踪的具体人物，且后文在有限范围内揭示其姓名或稳定称呼，请使用后文揭示的姓名或稳定称呼。"
-        "身份工具触发规则是强规则：遇到少女、女孩、姑娘、少年、老人、老者这类可追踪具体人物的临时身份词时，不要直接 submit_labels，必须先调用 locate_identity 查找后文候选区域；如果返回候选，再调用 resolve_identity 细读候选区域。"
-        "如果 resolve_identity 得到稳定姓名或称呼，使用该结果作为候选 speaker，并用 record_character 记录显示名、别名和证据；如果有界查找没有证据，可以保留临时身份词，但必须在 reason 里说明查找结果。"
-        "如果已有角色库条目，提交前凡是 speaker 可能是别名、简称或临时称呼，必须调用 normalize_speaker 获取显示名归一建议；该建议只辅助判断，不能自动覆盖原文证据或 submit_labels 的最终 speaker。"
-        "当 Labeler、Verifier、Identity Resolver 或 Normalizer 结论冲突时，必须调用 arbitrate_identity 获取裁决建议；最终仍必须用 submit_labels 明确提交。"
-        "不要把“我”“咱”“汝”“你”“您”等代词或口癖当成身份后置词；如果上下文已经能判断这是某个已知角色的自称，直接用该角色名，不要对代词调用 locate_identity。"
-        "如果当前引号内容是在某个角色讲故事、转述戏曲、举例或复述别人说过的话，speaker 应该是外层正在讲述的角色，不要把故事内部的男孩、恶魔、商人等人物当成当前真实说话人。"
+        + identity_instruction
+        + "如果当前引号内容是在某个角色讲故事、转述戏曲、举例或复述别人说过的话，speaker 应该是外层正在讲述的角色，不要把故事内部的男孩、恶魔、商人等人物当成当前真实说话人。"
         "不要为了无名群体、路人或临时职能角色无限寻找姓名；只有具体人物明显会继续参与场景时，才进行有限的后文确认。"
         "如果引号内容明显不是人物说话，而是叙述中的环境声、物体声音、心理比喻声或声音效果，请标注为“非人物发声”；如果文本明确说明某个角色发出该声音，如喊叫、叹息、笑声或嚎叫，仍标注该角色。"
         "短句、追问、省略号、沉默或半句话要重点参考相邻对话和最近已标注结果；不要机械沿用上一句说话人。"
@@ -131,7 +142,11 @@ def system_prompt(protocol: str) -> str:
     )
 
 
-def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str:
+def batch_prompt(
+    batch_result: dict[str, Any],
+    context_window_lines: int,
+    include_identity_tools: bool = True,
+) -> str:
     progress = batch_result["progress"]
     dialogues = batch_result["dialogues"]
     first_line = min(dialogue["line_number"] for dialogue in dialogues)
@@ -182,14 +197,25 @@ def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str
                 f"- {character.get('display_name')} aliases={aliases} "
                 f"confidence={character.get('confidence')} last_seen={character.get('last_seen_dialogue_index')}"
             )
-    lines.extend(
+    final_instructions = [
+        "",
+        f"第一步请调用 read_novel(start_line={context_start}, end_line={context_end}) 读取上下文。",
+        "根据上下文判断说话人；如果遇到可追踪具体人物的身份后置介绍，可以有限读取后文确认姓名或稳定称呼。",
+    ]
+    if include_identity_tools:
+        final_instructions.extend(
+            [
+                "身份工具检查：如果候选 speaker 是少女、女孩、姑娘、少年、老人、老者等临时身份词，且像是会继续参与场景的具体人物，必须先调用 locate_identity；有候选范围时继续调用 resolve_identity。",
+                "角色库检查：如果已知角色库非空，且候选 speaker 可能是别名、简称或临时称呼，提交前必须调用 normalize_speaker；解析出新稳定姓名时调用 record_character 记录证据。",
+                "冲突检查：如果 Labeler、Verifier、Identity Resolver 或 Normalizer 结论不一致，必须调用 arbitrate_identity 后再提交。",
+            ]
+        )
+    else:
+        final_instructions.append(
+            "身份复核由 Coordinator 的独立 Identity Locator / Resolver 在提交后处理；主 Labeler 不需要调用身份工具。"
+        )
+    final_instructions.extend(
         [
-            "",
-            f"第一步请调用 read_novel(start_line={context_start}, end_line={context_end}) 读取上下文。",
-            "根据上下文判断说话人；如果遇到可追踪具体人物的身份后置介绍，可以有限读取后文确认姓名或稳定称呼。",
-            "身份工具检查：如果候选 speaker 是少女、女孩、姑娘、少年、老人、老者等临时身份词，且像是会继续参与场景的具体人物，必须先调用 locate_identity；有候选范围时继续调用 resolve_identity。",
-            "角色库检查：如果已知角色库非空，且候选 speaker 可能是别名、简称或临时称呼，提交前必须调用 normalize_speaker；解析出新稳定姓名时调用 record_character 记录证据。",
-            "冲突检查：如果 Labeler、Verifier、Identity Resolver 或 Normalizer 结论不一致，必须调用 arbitrate_identity 后再提交。",
             "排除项：不要对“我/咱/汝/你/您”等代词或口癖做身份后置查找；不要把故事、戏曲、传闻里的内部人物当成当前引号的真实 speaker。",
             "对很短的追问、沉默、省略号或半句话，务必结合前后相邻对话轮次和最近已标注 speaker 判断。",
             "如果需要更多线索，再调用 read_novel 或 search_novel；不要为了普通无名群体无限查找姓名。",
@@ -199,6 +225,7 @@ def batch_prompt(batch_result: dict[str, Any], context_window_lines: int) -> str
             ),
         ]
     )
+    lines.extend(final_instructions)
     return "\n".join(lines)
 
 
@@ -237,6 +264,7 @@ class AgentRunner:
                 lookahead_rounds=self.tools.identity_lookahead_rounds,
             )
         )
+        self._labeler_include_identity_tools = self.identity_agent is None
         self.coordinator = Coordinator(
             verifier_agent=self.verifier_agent,
             identity_agent=self.identity_agent,
@@ -263,8 +291,21 @@ class AgentRunner:
             )
 
         messages = [
-            ChatMessage(role="system", content=system_prompt(self.config.protocol)),
-            ChatMessage(role="user", content=batch_prompt(initial_batch, self.config.context_window_lines)),
+            ChatMessage(
+                role="system",
+                content=system_prompt(
+                    self.config.protocol,
+                    include_identity_tools=self._labeler_include_identity_tools,
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=batch_prompt(
+                    initial_batch,
+                    self.config.context_window_lines,
+                    include_identity_tools=self._labeler_include_identity_tools,
+                ),
+            ),
         ]
         if self.prompt_output is not None:
             print(format_prompt_messages(messages), file=self.prompt_output)
@@ -333,7 +374,10 @@ class AgentRunner:
         tools = (
             None
             if self.config.protocol == "json"
-            else local_tool_specs(submit_label_count=submit_label_count)
+            else local_tool_specs(
+                submit_label_count=submit_label_count,
+                include_identity_tools=self._labeler_include_identity_tools,
+            )
         )
         return self.model_client.chat(
             messages=messages,
