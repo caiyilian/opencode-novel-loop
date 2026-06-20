@@ -761,6 +761,23 @@ class AgentLoopTest(unittest.TestCase):
         self.assertIn("非人物发声", prompt)
         self.assertIn("短句、追问、省略号", prompt)
 
+    def test_coordinator_identity_prompt_does_not_require_labeler_identity_tools(self) -> None:
+        system = system_prompt("auto", include_identity_tools=False)
+        prompt = batch_prompt(
+            {
+                "progress": {"labeled": 0, "total": 1, "remaining": 1},
+                "dialogues": [{"index": 0, "line_number": 100, "text": "为什么？"}],
+            },
+            context_window_lines=40,
+            include_identity_tools=False,
+        )
+
+        self.assertNotIn("必须先调用 locate_identity", system)
+        self.assertNotIn("record_character", system)
+        self.assertIn("Coordinator", system)
+        self.assertIn("独立 Identity Locator / Resolver", prompt)
+        self.assertNotIn("必须先调用 locate_identity", prompt)
+
     def test_batch_prompt_uses_configured_context_window(self) -> None:
         prompt = batch_prompt(
             {
@@ -776,6 +793,49 @@ class AgentLoopTest(unittest.TestCase):
         self.assertIn("必须先调用 locate_identity", prompt)
         self.assertIn("角色库检查", prompt)
         self.assertIn("故事、戏曲、传闻", prompt)
+
+    def test_identity_auto_mode_hides_identity_tools_from_labeler_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            labels = Path(directory) / "labels.txt"
+            tools = DialoopLocalTools(DialogueIndex.from_text(SAMPLE_TEXT), LabelStore(labels), batch_size=1)
+            client = FakeModelClient(
+                [
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read",
+                                name="read_novel",
+                                arguments={"start_line": 1, "end_line": 2},
+                            )
+                        ],
+                    ),
+                    ChatResult(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-submit",
+                                name="submit_labels",
+                                arguments={"speakers": ["Lawrence"]},
+                            )
+                        ],
+                    ),
+                ]
+            )
+
+            result = AgentRunner(
+                client,
+                tools,
+                AgentLoopConfig(protocol="tools", max_tool_steps=3, identity_mode="auto"),
+            ).run_one_batch()
+
+            self.assertTrue(result.submitted)
+            exposed_tools = {spec.name for spec in client.calls[0]["tools"]}
+            self.assertEqual(exposed_tools, {"get_next_dialogue", "read_novel", "search_novel", "submit_labels"})
+            first_messages = client.calls[0]["messages"]
+            self.assertIn("Coordinator", first_messages[0].content)
+            self.assertNotIn("locate_identity", first_messages[0].content)
+            self.assertNotIn("locate_identity", first_messages[1].content)
 
     def test_batch_prompt_includes_neighbor_dialogues(self) -> None:
         prompt = batch_prompt(
