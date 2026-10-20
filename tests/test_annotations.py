@@ -81,6 +81,29 @@ class AnnotationRecordTest(unittest.TestCase):
         self.assertEqual(loaded["arbiter"]["decision"], "reject_labeler")
         self.assertTrue(loaded["arbiter"]["blocks_submission"])
 
+    def test_serializes_identity_review(self) -> None:
+        record = AnnotationRecord(
+            index=1,
+            line_number=12,
+            text="Hello.",
+            speaker="\u5c11\u5973",
+            evidence_lines=[12],
+            reason="Temporary speaker.",
+            rejected_candidates=[],
+            confidence="medium",
+            tool_summary={},
+            identity={
+                "verdict": "resolved",
+                "recommended_speaker": "\u963f\u6d1b",
+                "evidence_lines": [20],
+            },
+        )
+
+        loaded = json.loads(record.to_json_line())
+
+        self.assertEqual(loaded["identity"]["verdict"], "resolved")
+        self.assertEqual(loaded["identity"]["recommended_speaker"], "\u963f\u6d1b")
+
     def test_store_appends_jsonl_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".dialoop" / "annotations.jsonl"

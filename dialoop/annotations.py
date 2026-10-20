@@ -24,6 +24,7 @@ class AnnotationRecord:
     recovery: Optional[dict[str, Any]] = None
     risk: Optional[dict[str, Any]] = None
     verifier: Optional[dict[str, Any]] = None
+    identity: Optional[dict[str, Any]] = None
     arbiter: Optional[dict[str, Any]] = None
     coordinator_trace: Optional[list[dict[str, Any]]] = None
 
@@ -41,6 +42,7 @@ class AnnotationRecord:
             "recovery": self.recovery,
             "risk": self.risk,
             "verifier": self.verifier,
+            "identity": self.identity,
             "arbiter": self.arbiter,
             "coordinator_trace": self.coordinator_trace,
         }
@@ -52,6 +54,7 @@ class AnnotationRecord:
         self,
         risk: Optional[dict[str, Any]],
         verifier: Optional[dict[str, Any]] = None,
+        identity: Optional[dict[str, Any]] = None,
         arbiter: Optional[dict[str, Any]] = None,
         coordinator_trace: Optional[list[dict[str, Any]]] = None,
     ) -> "AnnotationRecord":
@@ -68,6 +71,7 @@ class AnnotationRecord:
             recovery=self.recovery,
             risk=risk,
             verifier=verifier,
+            identity=identity,
             arbiter=arbiter,
             coordinator_trace=_copy_trace(coordinator_trace),
         )

@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Optional, Protocol
 
 from .annotations import AnnotationRecord
+from .identity import should_coordinate_identity_lookup
 from .risk import RiskAssessment
 
 
@@ -35,6 +36,11 @@ class VerifierLike(Protocol):
         ...
 
 
+class IdentityLike(Protocol):
+    def review(self, record: AnnotationRecord) -> Any:
+        ...
+
+
 @dataclass(frozen=True)
 class AgentSpec:
     agent: str
@@ -63,13 +69,13 @@ DEFAULT_AGENT_SPECS: dict[str, AgentSpec] = {
     ),
     "identity_locator": AgentSpec(
         agent="identity_locator",
-        prompt_constructor="deterministic_tool:locate_identity",
-        context_budget_tokens=0,
+        prompt_constructor="dialoop.identity.IdentityPipelineAgent.review:locate",
+        context_budget_tokens=800,
     ),
     "identity_resolver": AgentSpec(
         agent="identity_resolver",
-        prompt_constructor="deterministic_tool:resolve_identity",
-        context_budget_tokens=0,
+        prompt_constructor="dialoop.identity.IdentityPipelineAgent.review:resolve",
+        context_budget_tokens=800,
     ),
     "normalizer": AgentSpec(
         agent="normalizer",
@@ -127,6 +133,8 @@ class ArbiterLike(Protocol):
         verifier_review: dict[str, Any],
         record: AnnotationRecord,
         risk: RiskAssessment,
+        identity_result: Optional[AgentResult] = None,
+        identity_review: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         ...
 
@@ -140,7 +148,31 @@ class StructuredArbiterAgent:
         verifier_review: dict[str, Any],
         record: AnnotationRecord,
         risk: RiskAssessment,
+        identity_result: Optional[AgentResult] = None,
+        identity_review: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
+        if (
+            identity_result is not None
+            and identity_result.verdict == "resolved"
+            and identity_result.recommended_speaker
+            and identity_result.recommended_speaker != record.speaker
+        ):
+            return {
+                "enabled": True,
+                "decision": "use_resolved_identity",
+                "verdict": "reject",
+                "recommended_speaker": identity_result.recommended_speaker,
+                "evidence_lines": list(identity_result.evidence_lines or []),
+                "counter_evidence_lines": [],
+                "reason": (
+                    "Identity Resolver found a stable evidence-backed speaker different "
+                    f"from the labeler speaker: {identity_result.reason}"
+                ),
+                "confidence": identity_result.confidence,
+                "block_reason_code": "identity_resolved_conflict",
+                "identity": dict(identity_review or {}),
+                "blocks_submission": True,
+            }
         if verifier_result.verdict == "reject":
             return {
                 "enabled": True,
@@ -241,6 +273,7 @@ class CoordinatorTraceEvent:
 class CoordinatorDecision:
     risk: dict[str, Any]
     verifier: Optional[dict[str, Any]]
+    identity: Optional[dict[str, Any]]
     arbiter: Optional[dict[str, Any]]
     trace: list[CoordinatorTraceEvent]
 
@@ -262,6 +295,7 @@ class Coordinator:
     def __init__(
         self,
         verifier_agent: Optional[VerifierLike] = None,
+        identity_agent: Optional[IdentityLike] = None,
         arbiter_agent: Optional[ArbiterLike] = None,
         verifier_mode: str = "off",
         verifier_context_budget: int = 1200,
@@ -270,6 +304,7 @@ class Coordinator:
         if verifier_mode not in {"off", "risk", "all"}:
             raise ValueError(f"unsupported verifier_mode: {verifier_mode}")
         self.verifier_agent = verifier_agent
+        self.identity_agent = identity_agent
         self.arbiter_agent = arbiter_agent or StructuredArbiterAgent()
         self.verifier_mode = verifier_mode
         self.agent_specs = dict(DEFAULT_AGENT_SPECS if agent_specs is None else agent_specs)
@@ -282,9 +317,25 @@ class Coordinator:
         trace: list[CoordinatorTraceEvent] = []
         labeler_result = self._append_labeler_result(trace, record)
         self._append_observed_tool_results(trace, record)
+        identity, identity_result = self._maybe_call_identity(trace, record)
         verifier, verifier_result = self._maybe_call_verifier(trace, record, risk)
-        arbiter = self._maybe_call_arbiter(trace, record, risk, labeler_result, verifier, verifier_result)
-        return CoordinatorDecision(risk=risk.to_dict(), verifier=verifier, arbiter=arbiter, trace=trace)
+        arbiter = self._maybe_call_arbiter(
+            trace,
+            record,
+            risk,
+            labeler_result,
+            verifier,
+            verifier_result,
+            identity,
+            identity_result,
+        )
+        return CoordinatorDecision(
+            risk=risk.to_dict(),
+            verifier=verifier,
+            identity=identity,
+            arbiter=arbiter,
+            trace=trace,
+        )
 
     def _append_labeler_result(self, trace: list[CoordinatorTraceEvent], record: AnnotationRecord) -> AgentResult:
         result = AgentResult(
@@ -336,6 +387,67 @@ class Coordinator:
                     },
                 )
             )
+
+    def _maybe_call_identity(
+        self,
+        trace: list[CoordinatorTraceEvent],
+        record: AnnotationRecord,
+    ) -> tuple[Optional[dict[str, Any]], Optional[AgentResult]]:
+        if self.identity_agent is None:
+            return None, None
+        if not should_coordinate_identity_lookup(record.speaker):
+            return None, None
+
+        trace.append(
+            CoordinatorTraceEvent(
+                step=len(trace) + 1,
+                agent="identity_locator",
+                action="called",
+                reason="Coordinator triggered bounded identity lookup for a temporary speaker.",
+                metadata={
+                    "speaker": record.speaker,
+                    "line_number": record.line_number,
+                    "agent_spec": self.agent_specs["identity_locator"].to_dict(),
+                },
+            )
+        )
+        review = _identity_review_to_dict(self.identity_agent.review(record))
+        locator_result = _agent_result_from_identity_locator_review(review)
+        trace.append(
+            CoordinatorTraceEvent(
+                step=len(trace) + 1,
+                agent="identity_locator",
+                action="located" if _identity_candidate_count(review) > 0 else "not_enough_evidence",
+                reason=locator_result.reason,
+                result=locator_result,
+            )
+        )
+
+        resolver_result = _agent_result_from_identity_review(review)
+        if _identity_candidate_count(review) > 0 or resolver_result.verdict == "resolved":
+            trace.append(
+                CoordinatorTraceEvent(
+                    step=len(trace) + 1,
+                    agent="identity_resolver",
+                    action="called",
+                    reason="Identity locator returned candidate range(s); resolver checked same-person evidence.",
+                    metadata={
+                        "speaker": record.speaker,
+                        "candidate_count": _identity_candidate_count(review),
+                        "agent_spec": self.agent_specs["identity_resolver"].to_dict(),
+                    },
+                )
+            )
+            trace.append(
+                CoordinatorTraceEvent(
+                    step=len(trace) + 1,
+                    agent="identity_resolver",
+                    action=_identity_trace_action(resolver_result.verdict),
+                    reason=resolver_result.reason,
+                    result=resolver_result,
+                )
+            )
+        return review, resolver_result
 
     def _maybe_call_verifier(
         self,
@@ -405,10 +517,24 @@ class Coordinator:
         labeler_result: AgentResult,
         verifier: Optional[dict[str, Any]],
         verifier_result: Optional[AgentResult],
+        identity: Optional[dict[str, Any]],
+        identity_result: Optional[AgentResult],
     ) -> Optional[dict[str, Any]]:
         if verifier is None or verifier_result is None:
+            if not _needs_identity_arbiter(identity_result, record):
+                return None
+            verifier = {}
+            verifier_result = AgentResult(
+                agent="verifier",
+                verdict="accept",
+                recommended_speaker=record.speaker,
+                evidence_lines=record.evidence_lines,
+                reason="Verifier was not available; identity resolver result requires arbitration.",
+                confidence="medium",
+            )
+        if verifier_result is None:
             return None
-        if not _needs_arbiter(verifier_result, risk, record):
+        if not _needs_arbiter(verifier_result, risk, record, identity_result):
             return None
 
         trace.append(
@@ -416,11 +542,15 @@ class Coordinator:
                 step=len(trace) + 1,
                 agent="arbiter",
                 action="called",
-                reason=_arbiter_call_reason(verifier_result, risk, record),
+                reason=_arbiter_call_reason(verifier_result, risk, record, identity_result),
                 metadata={
                     "agent_spec": self.agent_specs["arbiter"].to_dict(),
                     "verifier_verdict": verifier.get("verdict"),
                     "verifier_confidence": verifier.get("confidence"),
+                    "identity_verdict": identity.get("verdict") if isinstance(identity, dict) else None,
+                    "identity_recommended_speaker": identity.get("recommended_speaker")
+                    if isinstance(identity, dict)
+                    else None,
                 },
             )
         )
@@ -430,6 +560,8 @@ class Coordinator:
             verifier_review=verifier,
             record=record,
             risk=risk,
+            identity_result=identity_result,
+            identity_review=identity,
         )
         result = _agent_result_from_arbiter_decision(decision)
         trace.append(
@@ -464,7 +596,84 @@ def _agent_result_from_verifier_review(review: dict[str, Any], record: Annotatio
     )
 
 
-def _needs_arbiter(verifier_result: AgentResult, risk: RiskAssessment, record: AnnotationRecord) -> bool:
+def _identity_review_to_dict(review: Any) -> dict[str, Any]:
+    if isinstance(review, dict):
+        return dict(review)
+    return {
+        "enabled": True,
+        "triggered": True,
+        "verdict": "not_enough_evidence",
+        "recommended_speaker": None,
+        "evidence_lines": [],
+        "reason": "Identity agent returned an unsupported review object.",
+        "confidence": "low",
+        "error": type(review).__name__,
+    }
+
+
+def _agent_result_from_identity_review(review: dict[str, Any]) -> AgentResult:
+    verdict = _optional_string(review.get("verdict")) or "not_enough_evidence"
+    if verdict not in {"resolved", "not_same_person", "not_enough_evidence"}:
+        verdict = "not_enough_evidence"
+    return AgentResult(
+        agent="identity_resolver",
+        verdict=verdict,
+        recommended_speaker=_optional_string(review.get("recommended_speaker")),
+        evidence_lines=_line_numbers(review.get("evidence_lines")),
+        reason=_optional_string(review.get("reason")) or f"Identity resolver returned {verdict}.",
+        confidence=_confidence(review.get("confidence"), default="low"),
+    )
+
+
+def _agent_result_from_identity_locator_review(review: dict[str, Any]) -> AgentResult:
+    candidate_count = _identity_candidate_count(review)
+    evidence_lines = []
+    candidate_ranges = review.get("candidate_ranges")
+    if isinstance(candidate_ranges, list):
+        evidence_lines = [
+            candidate.get("matched_line")
+            for candidate in candidate_ranges
+            if isinstance(candidate, dict)
+        ]
+    return AgentResult(
+        agent="identity_locator",
+        verdict="accept" if candidate_count > 0 else "not_enough_evidence",
+        evidence_lines=evidence_lines,
+        reason=f"Identity locator returned {candidate_count} candidate range(s).",
+        confidence="medium" if candidate_count > 0 else "low",
+    )
+
+
+def _identity_candidate_count(review: dict[str, Any]) -> int:
+    candidates = review.get("candidate_ranges")
+    if isinstance(candidates, list):
+        return len([candidate for candidate in candidates if isinstance(candidate, dict)])
+    attempts = review.get("locator_attempts")
+    if not isinstance(attempts, list):
+        return 0
+    return sum(
+        len(attempt.get("candidates", []))
+        for attempt in attempts
+        if isinstance(attempt, dict) and isinstance(attempt.get("candidates"), list)
+    )
+
+
+def _identity_trace_action(verdict: str) -> str:
+    if verdict == "resolved":
+        return "resolved"
+    if verdict == "not_same_person":
+        return "not_same_person"
+    return "not_enough_evidence"
+
+
+def _needs_arbiter(
+    verifier_result: AgentResult,
+    risk: RiskAssessment,
+    record: AnnotationRecord,
+    identity_result: Optional[AgentResult] = None,
+) -> bool:
+    if _needs_identity_arbiter(identity_result, record):
+        return True
     if verifier_result.verdict in {"reject", "uncertain"}:
         return True
     if not risk.needs_verifier or verifier_result.verdict != "accept":
@@ -474,7 +683,23 @@ def _needs_arbiter(verifier_result: AgentResult, risk: RiskAssessment, record: A
     return _fragile_high_risk_pass_reason(record, risk, verifier_result) is not None
 
 
-def _arbiter_call_reason(verifier_result: AgentResult, risk: RiskAssessment, record: AnnotationRecord) -> str:
+def _needs_identity_arbiter(identity_result: Optional[AgentResult], record: AnnotationRecord) -> bool:
+    return (
+        identity_result is not None
+        and identity_result.verdict == "resolved"
+        and identity_result.recommended_speaker is not None
+        and identity_result.recommended_speaker != record.speaker
+    )
+
+
+def _arbiter_call_reason(
+    verifier_result: AgentResult,
+    risk: RiskAssessment,
+    record: AnnotationRecord,
+    identity_result: Optional[AgentResult] = None,
+) -> str:
+    if _needs_identity_arbiter(identity_result, record):
+        return "Identity Resolver found a different stable evidence-backed speaker."
     if verifier_result.verdict == "accept":
         fragile_reason = _fragile_high_risk_pass_reason(record, risk, verifier_result)
         if fragile_reason is not None:
